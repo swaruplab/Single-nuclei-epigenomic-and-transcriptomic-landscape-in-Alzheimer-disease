@@ -1,0 +1,288 @@
+
+```{r eval=False}
+
+library(Seurat)
+library(tidyverse)
+library(ArchR)
+
+# set archR genome
+addArchRGenome("hg38")
+addArchRThreads(threads = 16)
+
+# load data in archr format
+proj <- loadArchRProject(path = "all_samples")
+
+
+```
+
+Call peaks with macs2
+```{r eval=FALSE}
+# construct pseudobulk replicates
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "monocle_clusters", force=TRUE)
+
+# call peaks with macs2
+pathToMacs2 <- findMacs2()
+proj <- addReproduciblePeakSet(
+    ArchRProj = proj,
+    pathToMacs2 = pathToMacs2,
+    groupBy = "monocle_clusters"
+)
+
+```
+
+Microglia footprints
+
+```{r eval=FALSE}
+
+# add pseudo-bulk for cluster+diagnosis
+proj$cluster_Diagnosis <- paste0(as.character(proj$monocle_clusters), '_', as.character(proj$Diagnosis))
+proj$celltype_Diagnosis <- paste0(as.character(proj$monocle_celltypes), '_', as.character(proj$Diagnosis))
+# pseudobulk for Cell.Type:
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "cluster_Diagnosis")
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "celltype_Diagnosis")
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "monocle_celltypes")
+proj <- saveArchRProject(ArchRProj = proj)
+
+# need to fix the files, replace with the path in Zeus/HPC3:
+pseudobulk_group <- 'celltype_Diagnosis'
+new_files <- dir(paste0(getwd(), '/all_samples/GroupCoverages/', pseudobulk_group))
+proj@projectMetadata$GroupCoverages@listData$celltype_Diagnosis$coverageMetadata$File <-paste0(getwd(), '/all_samples/GroupCoverages/', pseudobulk_group, '/', new_files)
+
+# select motifs
+motifPositions <- getPositions(proj)
+motifs <- c('SPI1', 'ETS1')
+markerMotifs <- unlist(lapply(motifs, function(x) grep(x, names(motifPositions), value = TRUE)))
+
+# call footprints in MG AD
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "celltype_Diagnosis",
+  logFile='./test.log'
+)
+
+# plot MG AD footprints
+seFoot_AD <- seFoot[,grepl('MG', colnames(seFoot))]
+plots <- plotFootprints(
+  seFoot = seFoot_AD,
+  ArchRProj = proj_MG_control,
+  pal = c("#E87D72", "#55BCC2"),
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-MG-Diagnosis",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+# call footprints for each cluster
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "monocle_clusters"
+)
+
+# plot MG footprints
+seFoot<- seFoot[,grepl('MG', colnames(seFoot))]
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj,
+  pal = color_scheme_snATAC_clusters$MG,
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-MG",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+
+```
+
+Footprints for astrocytes:
+
+```{r eval=FALSE}
+
+# select motifs
+motifs <- c('SHOX', 'ISX', 'FOSL2', 'CTCF', 'STAT3')
+markerMotifs <- unlist(lapply(motifs, function(x) grep(x, names(motifPositions), value = TRUE)))
+
+# call footprints in MG AD
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "celltype_Diagnosis"
+)
+
+# plot MG AD footprints
+seFoot_AD <- seFoot[,grepl('ASC', colnames(seFoot))]
+plots <- plotFootprints(
+  seFoot = seFoot_AD,
+  ArchRProj = proj,
+  pal = c("#E87D72", "#55BCC2"),
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-ASC-Diagnosis",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+# call footprints for each cluster
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "monocle_clusters"
+)
+
+# plot MG footprints
+seFoot<- seFoot[,grepl('ASC', colnames(seFoot))]
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj,
+  pal = color_scheme_snATAC_clusters$ASC,
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-ASC",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+```
+
+Footprints for EX + INH:
+
+```{r eval=FALSE}
+
+# select motifs
+motifs <- c('JUN', 'FOS', 'EGR')
+markerMotifs <- unlist(lapply(motifs, function(x) grep(x, names(motifPositions), value = TRUE)))
+
+# call footprints in MG AD
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "celltype_Diagnosis"
+)
+
+# plot Neuronal AD footprints
+selected <- as.logical(grepl('INH', colnames(seFoot)) + grepl('EX', colnames(seFoot)))
+seFoot_AD<- seFoot[,selected]
+plots <- plotFootprints(
+  seFoot = seFoot_AD,
+  ArchRProj = proj,
+  pal = c("#E87D72", "#55BCC2", "#E87D72", "#55BCC2"),
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-Neuronal-Diagnosis",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+#p call footprints for each cluster
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "monocle_clusters"
+)
+
+# plot MG footprints
+selected <- as.logical(grepl('INH', colnames(seFoot)) + grepl('EX', colnames(seFoot)))
+seFoot_cluster<- seFoot[,selected]
+plotFootprints(
+  seFoot = seFoot_cluster,
+  ArchRProj = proj,
+  pal = c(color_scheme_snATAC_clusters$EX, color_scheme_snATAC_clusters$INH),
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-Neuronal",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+```
+
+Footprints for ODC + OPC
+
+```{r eval=FALSE}
+
+# split ODCs by progenitor, intermediate, and mature for pseudobulk coverage:
+odc_clusters <- c('OPC.a', 'ODC.a', 'ODC.b', 'ODC.l', 'ODC.g', 'ODC.i', 'ODC.m', 'ODC.j', 'ODC.f', 'ODC.h', 'ODC.c', 'ODC.e', 'ODC.k', 'ODC.d')
+proj@cellColData$ODC_lineage <- ifelse(
+  as.character(proj@cellColData$monocle_clusters) %ni% odc_clusters, as.character(proj@cellColData$monocle_clusters), ifelse(
+    as.character(proj@cellColData$monocle_clusters) == 'OPC.a', 'pro', ifelse(
+      as.character(proj@cellColData$monocle_clusters) %in% c('ODC.a', 'ODC.b', 'ODC.l', 'ODC.g'), 'mf', 'mat'
+    )
+  )
+)
+proj@cellColData$lineage_diagnosis <- paste0(as.character(proj@cellColData$ODC_lineage), '_', as.character(proj@cellColData$Diagnosis))
+
+# add pseudobulk:
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "ODC_lineage")
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "lineage_diagnosis")
+proj <- saveArchRProject(ArchRProj = proj)
+
+# select motifs
+motifs <- c('OLIG', 'SOX', 'SREBF', 'NEUROD', 'TCF', 'NRF', 'NFKB')
+markerMotifs <- unlist(lapply(motifs, function(x) grep(x, names(motifPositions), value = TRUE)))
+
+# call footprints in MG AD
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  #groupBy = "ODC_lineage"
+  groupBy = 'celltype_Diagnosis'
+)
+
+# plot ODC lineage footprints
+selected <- grepl('ODC', colnames(seFoot))
+seFoot<- seFoot[,selected]
+plots <- plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj,
+  pal = c("#E87D72", "#55BCC2"),
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-ODC-Diagnosis",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+# call footprints for Diagnosis
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "lineage_diagnosis"
+)
+
+# plot ODC diagnosis footprints
+selected <- as.logical(grepl('mat', colnames(seFoot)) + grepl('mf', colnames(seFoot)) + grepl('pro', colnames(seFoot)))
+seFoot_disease_lineage <- seFoot[,selected]
+plotFootprints(
+  seFoot = seFoot_disease_lineage,
+  ArchRProj = proj,
+  pal = c("#E87D72", "#55BCC2", "#E87D72", "#55BCC2", "#E87D72", "#55BCC2"),
+  normMethod = "Subtract",
+  plotName = "Footprints-Subtract-Bias-ODC-lineage_Diagnosis",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+```
+
+Footprints for whole celltypes:
+
+```{r eval=FALSE}
+
+# select motifs
+motifs <- c('CTCF', 'SOX', 'NEUROD', 'SHOX', 'ISX','NRF')
+markerMotifs <- unlist(lapply(motifs, function(x) grep(x, names(motifPositions), value = TRUE)))
+
+# call footprints in MG AD
+seFoot <- getFootprints(
+  ArchRProj = proj,
+  positions = motifPositions[markerMotifs],
+  groupBy = "monocle_celltypes"
+)
+
+plotFootprints(
+  seFoot = seFoot,
+  ArchRProj = proj,
+  pal = unlist(color_scheme_snATAC_celltype),
+  normMethod = "Subtract",
+  plotName = "Footprints_celtypes2",
+  addDOC = FALSE,
+  smoothWindow = 5
+)
+
+```
