@@ -1,0 +1,431 @@
+
+```{r eval=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(cowplot)
+library(tidyverse)
+library(viridis)
+library(wesanderson)
+theme_set(theme_cowplot())
+
+# load data
+NucSeq <- readRDS('data/NucSeq_batch_correct_seurat.rds')
+NucSeq.atac <- readRDS('data/NucSeq_processed_activity_qc_batch_correct.rds')
+NucSeq.coembed <- readRDS('data/NucSeq_coembed_seurat.rds')
+
+
+my_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  legend.position="none",
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+```
+
+# Figure 1 umap plots
+
+```{r eval=FALSE}
+
+png('figures/snATAC_umap_celltypes.png', width=5, height=5, res=1000, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='monocle_clusters_umap_Cell.Type', cols=unlist(color_scheme_snATAC_celltype), label=F) + my_theme
+dev.off()
+
+png('figures/snATAC_umap_Diagnosis.png', width=5, height=5, res=1000, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='Diagnosis', label=F) + my_theme
+dev.off()
+
+png('figures/coembed_umap_atac_celltype.png', width=5, height=5, res=1000, units='in')
+DimPlot(subset(NucSeq.coembed, tech == 'atac'), reduction='umap', group.by='Cell.Type', label=F, cols=unlist(color_scheme_snATAC_celltype)) + my_theme
+dev.off()
+
+png('figures/umap_coembed_tech_atac.png', width=7, height=7, res=300, units='in')
+DimPlot(NucSeq.coembed, cells.highlight =colnames(NucSeq.coembed)[NucSeq.coembed$tech =='atac'], cols.highlight='hotpink3') + umap_theme + NoLegend()
+dev.off()
+
+png('figures/umap_coembed_tech_rna.png', width=7, height=7, res=300, units='in')
+DimPlot(NucSeq.coembed, cells.highlight =colnames(NucSeq.coembed)[NucSeq.coembed$tech =='rna'], cols.highlight='darkgoldenrod3') + umap_theme + NoLegend()
+dev.off()
+
+
+##### snATAC UMAP before batch correction
+fig_dir <- "~/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/for_paper/supplemental2/"
+
+png(paste0(fig_dir,"snATAC_umap_after_batch_correction.png"), width=7, height=7, res=500, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='Batch') + my_theme
+dev.off()
+
+NucSeq.atac_cds <- readRDS(file='../celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct_cds.rds')
+NucSeq.atac_cds <- reduce_dimension(NucSeq.atac_cds, reduction_method = 'UMAP', preprocess_method = "LSI")
+
+monocle_umap <- NucSeq.atac_cds@reducedDims[["UMAP"]][rownames(NucSeq.atac_cds@reducedDims[["UMAP"]]) %in% colnames(NucSeq.atac),]
+colnames(monocle_umap) <- c('UMAP_1', 'UMAP_2')
+all.equal(rownames(monocle_umap), colnames(NucSeq.atac))
+NucSeq.atac@reductions$umap@cell.embeddings <- monocle_umap
+
+png(paste0(fig_dir,"snATAC_umap_before_batch_correction.png"), width=7, height=7, res=500, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='Batch') + my_theme
+dev.off()
+
+rm(NucSeq.atac)
+
+###### joint UMAP before batch correction
+fig_dir <- "~/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/for_paper/supplemental2/"
+
+png(paste0(fig_dir,"coembed_umap_after_batch_correction.png"), width=28, height=14, res=500, units='in')
+DimPlot(NucSeq.coembed, reduction='umap', group.by='Batch', split.by='tech') + my_theme
+dev.off()
+
+
+NucSeq.coembed <- RunUMAP(NucSeq.coembed, reduction='pca', dims=1:30)
+NucSeq.coembed$Batch_coembed <- ifelse(NucSeq.coembed$tech == 'rna', paste0('rna_', NucSeq.coembed$Batch), paste0('atac_', NucSeq.coembed$Batch))
+
+png(paste0(fig_dir,"coembed_umap_before_batch_correction.png"), width=14, height=7, res=500, units='in')
+DimPlot(NucSeq.coembed, reduction='umap', group.by='Batch', split.by='tech') + my_theme
+dev.off()
+
+
+
+```
+
+
+## Supplemental X, snATAC-seq quality metrics
+```{r eval=FALSE}
+
+fig_dir <-'/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/for_paper/supplemental_snATAC_qc/'
+
+qc_features <- c('nCount_peaks', 'nFeature_peaks', 'nucleosome_signal', 'DNase_sensitive_region_fragments', 'enhancer_region_fragments', 'TSS_fragments', 'promoter_region_fragments', 'blacklist_region_fragments', 'on_target_fragments', 'peak_region_fragments')
+
+# load up-to-date metadata
+sample_meta <- read.csv('/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/data/metaData_snRNAseq_fix.csv', stringsAsFactors=FALSE)
+rownames(sample_meta) <- sample_meta$Sample.ID
+sample_meta$Tangle.Stage <- ifelse(sample_meta$Tangle.Stage == 'Stage I', "Stage 1", sample_meta$Tangle.Stage)
+
+NucSeq.atac$Tangles <- ifelse(NucSeq.atac$Sample.ID == 'Sample-40', as.character(NucSeq.atac$Tangle.Stage), sample_meta[NucSeq.atac$Sample.ID,"Tangle.Stage"])
+NucSeq.atac$Plaques <- ifelse(NucSeq.atac$Sample.ID == 'Sample-40', as.character(NucSeq.atac$Plaque.Stage), sample_meta[NucSeq.atac$Sample.ID,"Plaque.Stage"])
+
+pdf(paste0(fig_dir, 'snATAC_qc_violin.pdf'), width=8, height=4)
+for(i in 1:length(qc_features)){
+  p <- VlnPlot(NucSeq.atac, features=qc_features[i], cols=color_scheme_snATAC_clusters_flat, pt.size=0, group.by='monocle_clusters_umap_ID', ncol=1) +
+    geom_boxplot(fill='white', outlier.shape=NA) + RotatedAxis() + NoLegend()
+  print(p)
+}
+dev.off()
+
+pdf(paste0(fig_dir, 'snATAC_qc_violin_samples.pdf'), width=8, height=4)
+for(i in 1:length(qc_features)){
+  p <- VlnPlot(NucSeq.atac, features=qc_features[i], pt.size=0, group.by='Sample.ID', cols=sample_colors, ncol=1) +
+    geom_boxplot(fill='white', outlier.shape=NA) + RotatedAxis() + NoLegend()
+  print(p)
+}
+dev.off()
+
+pdf(paste0(fig_dir, 'snATAC_qc_violin_samples_legend.pdf'), width=8, height=8)
+VlnPlot(NucSeq.atac, features=qc_features[1], pt.size=0, group.by='Sample.ID', cols=sample_colors, ncol=1)
+dev.off()
+
+pdf(paste0(fig_dir, 'snATAC_nucleosome.pdf'), width=12, height=8)
+#print(PeriodPlot(NucSeq.atac, group.by = 'Sample.ID'))
+PeriodPlot(NucSeq.atac, group.by = 'Sample.ID') + scale_fill_manual(values=sample_colors) + NoLegend()
+
+dev.off()
+
+
+# sex ##########################################################################
+sex_colors <- c('gold', 'dodgerblue')
+png(paste0(fig_dir, 'snATAC_umap_sex.png'), width=10, height=10, res=500, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='Sex', label=F, cols=sex_colors)+ my_theme
+dev.off()
+
+NucSeq_meta <- NucSeq.atac@meta.data
+variable <- 'Sex'
+cluster_var <- 'monocle_clusters_umap_ID'
+clusters <- unique(NucSeq_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(NucSeq_meta[NucSeq_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(NucSeq_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "snATAC_barplot_sex.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=sex_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+# age ##########################################################################
+age_colors <- magma(12)[3:11]
+NucSeq.atac$age <- as.numeric(paste(NucSeq.atac$Age))
+png(paste0(fig_dir, 'snATAC_umap_age.png'), width=10, height=10, res=500, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='age', label=F, cols=age_colors)+ my_theme
+dev.off()
+
+NucSeq_meta <- NucSeq.atac@meta.data
+variable <- 'Age'
+cluster_var <- 'monocle_clusters_umap_ID'
+clusters <- unique(NucSeq_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(NucSeq_meta[NucSeq_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(NucSeq_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+df$Var1 <- as.numeric(paste(df$Var1))
+pdf(paste0(fig_dir, "snATAC_barplot_age.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_gradientn(colors=age_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+# RIN ##########################################################################
+RIN_colors <- colorRampPalette(rev(brewer.pal(9, 'Purples' )[2:9]))
+NucSeq.atac$RIN.MOD <- as.numeric(paste(NucSeq.atac$RIN.MOD))
+png(paste0(fig_dir, 'snATAC_umap_RIN.png'), width=10, height=10, res=500, units='in')
+FeaturePlot(NucSeq.atac, reduction='umap', features='RIN.MOD', cols=RIN_colors(256), label=F) + my_theme + ggtitle('')
+dev.off()
+
+NucSeq_meta <- NucSeq.atac@meta.data
+variable <- 'RIN.MOD'
+cluster_var <- 'monocle_clusters_umap_ID'
+clusters <- unique(NucSeq_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(NucSeq_meta[NucSeq_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(NucSeq_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+df$Var1 <- as.numeric(paste(df$Var1))
+pdf(paste0(fig_dir, "snATAC_barplot_RIN.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_gradientn(colors=RIN_colors(256)) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+# sample ID ####################################################################
+png(paste0(fig_dir, 'snATAC_umap_sampleID.png'), width=10, height=10, res=500, units='in')
+DimPlot(NucSeq.atac, reduction='umap', group.by='Sample.ID', label=F, cols=sample_colors) + my_theme
+dev.off()
+
+NucSeq_meta <- NucSeq.atac@meta.data
+variable <- 'Sample.ID'
+cluster_var <- 'monocle_clusters_umap_ID'
+clusters <- unique(NucSeq_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(NucSeq_meta[NucSeq_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(NucSeq_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+df$Var1 <- factor(df$Var1, levels=names(sample_colors))
+
+pdf(paste0(fig_dir, "snATAC_barplot_sampleID.pdf"), height=4, width=9)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=sample_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+# plaque stage #################################################################
+plaque_colors <- magma(4)
+
+png(paste0(fig_dir, 'snATAC_umap_plaques.png'), width=10, height=10, res=500, units='in')
+DimPlot(NucSeq.atac[,!is.na(NucSeq.atac$Plaques)], reduction='umap', group.by='Plaques', label=F, cols=plaque_colors) + my_theme + NoLegend()
+dev.off()
+
+NucSeq_meta <- NucSeq.atac@meta.data %>% subset(!is.na(Plaques))
+variable <- 'Plaques'
+cluster_var <- 'monocle_clusters_umap_ID'
+clusters <- unique(NucSeq_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(NucSeq_meta[NucSeq_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(NucSeq_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "snATAC_barplot_plaques.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=plaque_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+# tangle stage #################################################################
+tangle_colors <- magma(6)
+
+png(paste0(fig_dir, 'snATAC_umap_Tangles.png'), width=10, height=10, res=500, units='in')
+DimPlot(NucSeq.atac[,!is.na(NucSeq.atac$Tangles)], reduction='umap', group.by='Tangles', label=F, cols=tangle_colors) + my_theme + NoLegend()
+dev.off()
+
+NucSeq_meta <- NucSeq.atac@meta.data %>% subset(!is.na(Tangles))
+variable <- 'Tangles'
+cluster_var <- 'monocle_clusters_umap_ID'
+clusters <- unique(NucSeq_meta[[cluster_var]])
+df <- data.frame()
+for(i in 1:length(clusters)){
+
+  cur_df <- table(NucSeq_meta[NucSeq_meta[[cluster_var]]==clusters[i],variable])
+  cur_df <- as.data.frame(cur_df / table(NucSeq_meta[[variable]])[names(cur_df)])
+  cur_df$Freq <- cur_df$Freq * 1/(sum(cur_df$Freq))
+
+  cur_df$cluster <- clusters[i]
+  df <- rbind(df, cur_df)
+}
+
+pdf(paste0(fig_dir, "snATAC_barplot_tangles.pdf"), height=4, width=8)
+p <- ggplot(df, aes(y=Freq, x=cluster, fill=Var1)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=tangle_colors) +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+
+
+
+```
+
+
+
+## Supplemental Label Transfer
+
+```{r eval=FALSE}
+fig_dir <- 'supplemental_label_transfer/'
+
+NucSeq.atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type != 'Unknown')
+
+prediction_features <- c(
+  'prediction.score.ASC', 'prediction.score.EX',
+  'prediction.score.INH', 'prediction.score.MG', 'prediction.score.ODC',
+  'prediction.score.OPC', 'prediction.score.PER.END'
+) %>% rev
+
+# blank snATAC umap:
+png(paste0(fig_dir, 'blank_atac_umap.png'), width=5, height=5, res=500, units='in')
+DimPlot(NucSeq.atac, group.by='all_cells', cols='lightgrey') + my_theme
+dev.off()
+
+# dot plot showing prediction value for each cell type
+pdf(paste0(fig_dir, 'prediction_score_dotplot_clusters.pdf'), width=6, height=12, useDingbats=F)
+DotPlot(NucSeq.atac, features=prediction_features, group.by="monocle_clusters_umap_ID", cols = c("lightgrey", "seagreen"), col.min=0.0, col.max=1.0, dot.min=0.65) + RotatedAxis()
+dev.off()
+
+pdf(paste0(fig_dir, 'prediction_score_dotplot_celltypes.pdf'), width=6, height=6, useDingbats=F)
+DotPlot(NucSeq.atac, features=prediction_features, group.by="monocle_clusters_umap_Cell.Type",  cols = c("lightgrey", "seagreen"), col.min=0.0, col.max=1.0, dot.min=0.65) + RotatedAxis()
+dev.off()
+
+# histograms for predicted values
+pdf(paste0(fig_dir, 'prediction_score_max_histogram.pdf'), width=6, height=3, useDingbats=F)
+ggplot(NucSeq.atac@meta.data, aes(x=prediction.score.max)) +
+geom_histogram( position="identity", alpha=0.5)+
+geom_vline(xintercept=0.5)
+dev.off()
+
+# prediction score UMAPS
+prediction_features <- c(prediction_features, 'prediction.score.max')
+plots <- FeaturePlot(NucSeq.atac, features=prediction_features, cols = c("lightgrey", "seagreen"), combine=F)
+for(i in 1:length(plots)){
+  plots[[i]] <- plots[[i]] + my_theme
+}
+
+png(paste0(fig_dir, 'prediction_score_featureplot.png'), width=15, height=15, res=1000, units='in')
+CombinePlots(plots, ncol=3)
+dev.off()
+
+
+
+```

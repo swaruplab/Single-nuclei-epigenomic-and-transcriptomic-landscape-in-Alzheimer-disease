@@ -10,12 +10,11 @@ library(wesanderson)
 theme_set(theme_cowplot())
 
 
-setwd("/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update")
 
 # load data
-NucSeq <- readRDS('celltype-analysis/data/NucSeq_batch_correct_seurat.rds')
-NucSeq.atac <- readRDS('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct.rds')
-NucSeq.coembed <- readRDS('~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/coembedding/seurat_coembedding/data/NucSeq_coembed_seurat.rds')
+NucSeq <- readRDS('data/NucSeq_batch_correct_seurat.rds')
+NucSeq.atac <- readRDS('data/NucSeq_processed_activity_qc_batch_correct.rds')
+NucSeq.coembed <- readRDS('data/NucSeq_coembed_seurat.rds')
 
 
 # theme to remove stuff from ggplots:
