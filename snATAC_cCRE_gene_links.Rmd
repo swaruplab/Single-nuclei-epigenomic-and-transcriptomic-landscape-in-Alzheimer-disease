@@ -1,0 +1,823 @@
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(ArchR)
+library(future.apply)
+library(ggpubr)
+library(reshape2)
+library(tictoc)
+library(patchwork)
+library(ggridges)
+library(RColorBrewer)
+
+# load Seurat object
+NucSeq.atac <- readRDS(file='data/NucSeq_macs2Peaks_signac.rds')
+NucSeq <- readRDS('data/NucSeq_batch_correct_seurat.rds')
+
+# load ArchR project
+proj <- loadArchRProject(path = "ArchR/all_samples")
+proj@peakSet$site_name <- rownames(NucSeq.atac)
+
+# ensebl gene annoation
+library(EnsDb.Hsapiens.v86)
+gene.coords <- genes(EnsDb.Hsapiens.v86, filter = ~ gene_biotype == "protein_coding")
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Extend(x = gene.coords, upstream = 2000, downstream = 0)
+genebodyandpromoter.coords <- genebodyandpromoter.coords %>% subset(seqnames %in% c(1:22,'Y','X'))
+
+# set data directory
+cicero_data_dir <- '/cicero/data/'
+
+# table to convert gene names to Ensembl IDs:
+ensembl <- read.delim(file='data/ensembl.tsv', sep='\t', header=TRUE)
+
+```
+
+Basic stats about cicero runs:
+
+* how many co-accessible connections in each cell type ? (heatmap, row=each cicero run, col=celltype)
+* how many CCANs? (heatmap, row=each cicero run, col=celltype)
+* how many connections in each CCAN? (box plot)
+
+```{r eval=FALSE}
+
+# load cicero data for one celltype
+celltypes <- c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC')
+
+conn_df <- data.frame()
+for(cur_celltype in celltypes){
+  print(cur_celltype)
+  load(paste0(cicero_data_dir, cur_celltype, "_CCANs.rda"))
+  load(paste0(cicero_data_dir, cur_celltype, "_cicero_connections.rda"))
+
+  # remove all connections below threshold:
+  ccan_cutoff <- 0.01
+  conns <- subset(conns, coaccess >= ccan_cutoff)
+  conns_AD <- subset(conns_AD, coaccess >= ccan_cutoff)
+  conns_control <- subset(conns_control, coaccess >= ccan_cutoff)
+
+  df <- data.frame(c(
+    nrow(conns) - sum(table(conns$coaccess) > 1),
+    nrow(conns_AD) - sum(table(conns_AD$coaccess) > 1),
+    nrow(conns_control) - sum(table(conns_control$coaccess) > 1)
+  ))
+  df$celltype <- paste0(cur_celltype, c('', '_AD', '_control'))
+  names(df)[1] <- 'n_conns'
+  conn_df <- rbind(conn_df, df)
+}
+
+conn_df$group <- do.call(rbind, str_split(conn_df$celltype, '_'))[,1]
+conn_df$condition <- do.call(rbind, str_split(conn_df$celltype, '_'))[,2]
+conn_df$condition <- ifelse(conn_df$condition %in% c('AD', 'control'), conn_df$condition, 'all')
+conn_df$condition <- factor(conn_df$condition, levels=c('all', 'AD', 'control'))
+
+library(scales)
+p <- ggplot(conn_df, aes(group, condition, fill=n_conns)) +
+  geom_tile() +
+  geom_text(aes(label=scales::comma(n_conns))) +
+  scale_fill_fermenter(palette = "Blues", direction=1) +
+  xlab('') + ylab('') +
+  theme_minimal() +
+  theme(
+    axis.text.x=element_text(angle=90, vjust=0.5),
+    axis.ticks=element_blank()
+  )
+
+pdf('figures/coaccess_heatmap.pdf', width=8, height=3)
+print(p)
+dev.off()
+
+```
+
+Load gl-CRE tables for whole celltype, control, AD
+
+```{r eval=FALSE}
+
+celltypes <- c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC')
+
+files <- dir(cicero_data_dir)
+files <- files[grepl('_peak_gene_correlation.csv', files)]
+df_list <- lapply(1:length(files), function(i){
+  df <- read.csv(paste0(cicero_data_dir, files[i]))
+  df$celltype <- celltypes[i]
+  df$FDR <- p.adjust(df$pval, method='fdr')
+  df
+})
+
+link_df <- Reduce(rbind, df_list)
+link_df$celltype <- factor(link_df$celltype, levels=celltypes)
+link_df$analysis <- 'joint'
+
+# AD ###########################################################################
+files <- dir(cicero_data_dir)
+files <- files[grepl('_peak_gene_correlation_AD.csv', files)]
+df_list_AD <- lapply(1:length(files), function(i){
+  df <- read.csv(paste0(cicero_data_dir, files[i]))
+  df$celltype <- celltypes[i]
+  df$FDR <- p.adjust(df$pval, method='fdr')
+  df
+})
+
+link_df_AD <- Reduce(rbind, df_list_AD)
+link_df_AD$celltype <- factor(link_df_AD$celltype, levels=celltypes)
+link_df_AD$analysis <- 'AD'
+
+# control #######################################################################
+files <- dir(cicero_data_dir)
+files <- files[grepl('_peak_gene_correlation_Control.csv', files)]
+df_list_control <- lapply(1:length(files), function(i){
+  df <- read.csv(paste0(cicero_data_dir, files[i]))
+  df$celltype <- celltypes[i]
+  df$FDR <- p.adjust(df$pval, method='fdr')
+  df
+})
+
+link_df_control <- Reduce(rbind, df_list_control)
+link_df_control$celltype <- factor(link_df_control$celltype, levels=celltypes)
+link_df_control$analysis <- 'Control'
+
+subset(link_df, FDR <= 0.05) %>% .$celltype %>% table
+subset(link_df_control, FDR <= 0.05) %>% .$celltype %>% table
+subset(link_df_AD, FDR <= 0.05) %>% .$celltype %>% table
+
+# save link_df
+save(link_df, file='data/link_df.rda')
+save(link_df_AD, file='data/link_df_AD.rda')
+save(link_df_control, file='data/link_df_control.rda')
+
+# merge all link_dfs:
+link_df <- Reduce(rbind, list(link_df, link_df_AD, link_df_control))
+
+# distance between peak and target gene
+peak1_ranges <- Signac::StringToGRanges(link_df$Peak1, sep=c(':', '-'))
+peak2_ranges <- Signac::StringToGRanges(link_df$Peak2, sep=c(':', '-'))
+link_df$distance_bp <- abs(start(peak1_ranges) - start(peak2_ranges))
+
+
+save(link_df, file='data/link_df_merged.rda')
+
+################################################################################
+# Plot distributions of pcc
+################################################################################
+load('data/link_df_merged.rda')
+
+# plot as ridge plot :
+plot_list <- list()
+for(group in c('AD', 'Control', 'joint')){
+  plot_df <- subset(link_df, analysis == group)
+  plot_list[[group]] <- ggplot(plot_df, aes(x=pcc, y=celltype, fill=celltype)) +
+    geom_density_ridges(scale=3) +
+    geom_vline(aes(xintercept=quantile(pcc, 0.95)),
+              color="black", linetype="dashed", size=0.5, alpha=0.8) +
+    geom_vline(aes(xintercept=quantile(pcc, 0.05)),
+              color="black", linetype="dashed", size=0.5, alpha=0.8) +
+    xlab("Pearson Coefficient") + ylab("") +
+    scale_fill_manual(values=color_scheme_snATAC_celltype) +
+    theme(
+      panel.background=element_blank(),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      axis.line.y = element_blank(),
+      axis.ticks.y = element_blank()
+    ) + NoLegend()
+}
+
+
+pdf(paste0('figures/correlation_distribution_ridge.pdf'), width=5, height=4)
+plot_list$AD
+plot_list$Control
+plot_list$joint
+dev.off()
+
+################################################################################
+# plot distance between peak and target gene:
+################################################################################
+
+pcc_quantile_thresh <- 0.05; repressor=TRUE;
+pcc_quantile_thresh <- 0.95; repressor=FALSE;
+
+plot_list <- list()
+for(group in c('AD', 'Control', 'joint')){
+
+  plot_df <- subset(link_df, analysis == group)
+  if(repressor){
+    plot_df <- subset(plot_df, pcc < quantile(plot_df$pcc, pcc_quantile_thresh))
+  } else{
+    plot_df <- subset(plot_df, pcc >= quantile(plot_df$pcc, pcc_quantile_thresh))
+  }
+  print(median(plot_df$distance_bp/1000))
+  # plot distance from peak to gene in kbp
+  plot_list[[group]] <- ggplot(na.omit(plot_df), aes(x=distance_bp/1000, y=celltype, fill=celltype)) +
+    geom_density_ridges(scale=3) +
+    xlab("Distance to Gene (kbp)") + ylab("") +
+    xlim(0, 500) +
+    geom_vline(aes(xintercept=median(distance_bp/1000)),
+              color="black", linetype="dashed", size=0.5, alpha=0.8) +
+    scale_fill_manual(values=color_scheme_snATAC_celltype) +
+    theme(
+      panel.background=element_blank(),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      axis.line.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+    ) + NoLegend()
+
+}
+# median dist kb (enhancer)
+#[1] 148.772
+#[1] 151.4655
+#[1] 144.0785
+
+# median dist kb (repressor)
+#[1] 150.2005
+#[1] 152.164
+#[1] 147.182
+
+pdf('figures/interaction_distance_repressor.pdf', width=5, height=4)
+plot_list$AD
+plot_list$Control
+plot_list$joint
+dev.off()
+
+
+```
+
+
+## NMF to cluster enhancer peaks
+
+```{r eval=FALSE}
+
+# select peaks for clustering:
+top_links_AD <- link_df %>% subset(analysis == 'AD') %>%
+  subset(distance_bp/1000 >= 10 & pcc >= quantile(pcc, 0.95) & pval <= 0.01)
+
+top_links_control <- link_df %>% subset(analysis == 'Control') %>%
+  subset(distance_bp/1000 >= 10 & pcc >= quantile(pcc, 0.95) & pval <= 0.01)
+
+top_links_joint <- link_df %>% subset(analysis == 'joint') %>%
+  subset(distance_bp/1000 >= 10 & pcc >= quantile(pcc, 0.95) & pval <= 0.01)
+
+top_link_df <- Reduce(rbind, list(top_links_AD, top_links_control, top_links_joint)) %>% subset(Peak2_type != 'Promoter' & celltype != "PER.END")
+
+# remove promoter entries and Per.End
+top_link_df[grepl('APOE',as.character(top_link_df$Peak1_nearestGene)),]
+
+table(top_link_df$analysis)
+table(top_link_df$celltype)
+table(top_link_df$Peak2_type)
+length(unique(top_link_df$Peak2))
+
+# format peaks to use in nmf analysis:
+nmf_peaks <- sub(':', '-', unique(top_link_df$Peak2))
+
+# compute average accessibility of each cluster split by Diagnosis:
+Idents(NucSeq.atac) <- NucSeq.atac$monocle_clusters_umap_ID
+average_accessibility <- AverageExpression(NucSeq.atac, add.ident='Diagnosis')
+average_accessibility <- average_accessibility$peaks[nmf_peaks,]
+
+
+# cluster average accessibility matrix using NMF:
+library(NMF)
+
+k = 30
+n_out <- nmf(average_accessibility, k)
+
+# save NMF results:
+saveRDS(n_out, file='data/NMF_results_final.rds')
+n_out <- readRDS(file='data/NMF_results_final.rds')
+
+# get basis matrix of peaks by factors
+w <- basis(n_out)
+dim(w)
+
+# get coefficient matrix
+h <- coef(n_out)
+rownames(h) <- 1:nrow(h)
+h <- h[,order(colnames(h))]
+
+
+# get list of top modules in each cluster
+top_modules <- apply(h, 2, function(x){which(x == max(x))})
+top_modules_df <- data.frame(
+  module=top_modules,
+  group=names(top_modules),
+  cluster=do.call(rbind, strsplit(names(top_modules), '_'))[,1],
+  diagnosis=do.call(rbind, strsplit(names(top_modules), '_'))[,2]
+) %>% subset(cluster != 'PER.END.a')
+top_modules_df$celltype <- do.call(rbind, strsplit(as.character(top_modules_df$cluster), '[.]'))[,1]
+
+# reorder coefficient matrix based on clusters:
+h_new <- h[as.character(unique(top_modules_df$module)),]
+h <- rbind(h_new, h[!(rownames(h) %in% rownames(h_new)),])
+# plot coefficient matrix to see which modules are specific to each cluster
+
+row_ha <- rowAnnotation(
+  module = as.character(rownames(h))
+)
+
+pdf('figures/nmf_coefficient_heatmap.pdf', width=6, height=8)
+ComplexHeatmap::Heatmap(
+  h,
+  col = brewer.pal(9, 'Greens'),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = column_ha,
+  left_annotation = row_ha,
+  show_column_names=FALSE,
+  use_raster = TRUE
+
+)
+dev.off()
+
+
+# assigning each peak to a module
+modules <- as.data.frame(apply(w, 1, function(x){which(x == max(x))}))
+names(modules) <- c('module')
+top_link_df$NMF_module <- modules$module[match(sub(':', '-', top_link_df$Peak2), rownames(modules))]
+
+table(modules$module[match(nmf_peaks, rownames(modules))])
+
+save(top_link_df, file='data/top_link_df.rda')
+load('data/top_link_df.rda')
+
+```
+
+Plot accessibility of NMF clustered peaks
+
+```{r eval=FALSE}
+
+library(ComplexHeatmap)
+
+# remove duplicate peaks:
+top_link_unique <- distinct(top_link_df, Peak2, .keep_all=TRUE)
+
+# order peaks by NMF module and plot:
+top_link_unique$NMF_module <- factor(top_link_unique$NMF_module, levels=unique(top_modules))
+top_links_sorted <- top_link_unique %>%
+  arrange(NMF_module) %>%
+  subset(!is.na(NMF_module))
+
+# get accessibility matrix
+accessibility_matrix <- average_accessibility[sub(':', '-',as.character(top_links_sorted$Peak2)),]
+all.equal(sub(':', '-',as.character(top_links_sorted$Peak2)), rownames(accessibility_matrix))
+
+
+# convert to Z score
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(accessibility_matrix, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# range(matrix_z)
+matrix_z <- ifelse(matrix_z >= 4, 4, matrix_z)
+matrix_z <- ifelse(matrix_z <= -2, -2, matrix_z)
+
+# setup color schemes
+celltype_colors <- unlist(color_scheme_snATAC_celltype[1:7])
+cluster_colors <- color_scheme_snATAC_clusters_flat[1:length(color_scheme_snATAC_clusters_flat)-1]
+names(celltype_colors)[7] <- 'PER'
+
+column_ha <- HeatmapAnnotation(
+  CellType = do.call(rbind, str_split(colnames(matrix_z), '[.]'))[,1],
+  Cluster = do.call(rbind, str_split(colnames(matrix_z), '[_]'))[,1],
+  Diagnosis = do.call(rbind, str_split(colnames(matrix_z), '_'))[,2],
+  col = list(
+    CellType = celltype_colors,
+    Cluster = cluster_colors,
+    Diagnosis = c("AD" = "#E87D72", "Control" = "#55BCC2")
+  )
+)
+
+row_ha <- rowAnnotation(
+  module = as.character(top_links_sorted$NMF_module)
+)
+
+
+colfunc.atac = colorRamp2(c(-2, 0, 4), c(brewer.pal(11, 'PRGn' )[10], "white", brewer.pal(11, 'PRGn' )[2]))
+
+
+pdf('figures/nmf_module_accessibility_heatmap_test.pdf', width=7.5, height=10)
+ComplexHeatmap::Heatmap(
+  matrix_z,
+  col = colfunc.atac,
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = column_ha,
+  left_annotation = row_ha,
+  show_row_names=FALSE, show_column_names=FALSE,
+  use_raster = TRUE
+)
+dev.off()
+
+```
+
+Plot the NMF heatmap but annotate rows for DEGs:
+
+```{r eval=FALSE}
+
+# load DEGs
+load("data/all_DEGs.rda")
+
+
+AD_degs <- c()
+for(cur_celltype in c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC')){
+  cur_degs <- celltype.diagnosis.markers %>%
+    subset(cluster == 'AD' & avg_logFC >= 0)
+  cur_degs <- cur_degs[grepl(cur_celltype, cur_degs$celltype),]
+
+  # which modules are associated with this celltype?
+  cur_modules <- top_modules_df %>% subset(celltype == cur_celltype) %>% .$module %>% unique
+  cur_links <- top_links_sorted %>% subset(NMF_module %in% cur_modules)
+
+  # genes that are in these modules and are degs for this celltype:
+  cur_degs <- cur_degs %>% subset(gene %in% cur_links$Peak1_nearestGene)
+
+  # top genes in each cluster:
+  cur_degs <- cur_degs %>% group_by(celltype) %>% top_n(5, wt=avg_logFC) %>% .$gene %>% unique
+  AD_degs <- c(AD_degs, cur_degs)
+
+}
+AD_degs <- unique(AD_degs)
+
+
+# set up labels
+AD_degs_indices <- c()
+AD_degs_labels <- c()
+for(gene in AD_degs[!(AD_degs %in% genes.to.exclude)]){
+
+  # boolean array to index rows where this gene is present
+  gene_index <- grepl(gene, as.character(top_links_sorted$Peak1_nearestGene))
+  gene_index <- (1:nrow(top_links_sorted))[gene_index]
+
+  # sample to only 3 occurrences if there are more than 3
+  if(length(gene_index) > 3){
+    gene_index <- sample(gene_index, 3)
+  }
+
+  # indices:
+  AD_degs_indices <- c(AD_degs_indices, gene_index)
+
+  # labels:
+  AD_degs_labels <- c(AD_degs_labels, rep(gene, length(gene_index)))
+
+}
+
+table(AD_degs_labels)[rev(order(as.numeric(table(AD_degs_labels))))]
+length(AD_degs_labels)
+
+
+ha = rowAnnotation(
+  foo = anno_mark(
+    at = AD_degs_indices, labels = AD_degs_labels
+))
+
+pdf('figures/nmf_module_accessibility_heatmap.pdf', width=10, height=12)
+ComplexHeatmap::Heatmap(
+  matrix_z,
+  col = colfunc.atac,
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = column_ha,
+  left_annotation = row_ha,
+  right_annotation = ha,
+  show_row_names=FALSE, show_column_names=FALSE,
+  use_raster = TRUE
+)
+dev.off()
+
+```
+
+GO term enrichment analysis of target genes in each module:
+```{r eval=FALSE}
+
+library(enrichR)
+
+# helper fucntion
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+dbs <- c('GO_Biological_Process_2018','GO_Cellular_Component_2018',
+         'GO_Molecular_Function_2018')
+
+
+modules <- unique(top_link_df$NMF_module)
+modules <- modules[order(modules)]
+combined_output <- data.frame()
+for(cur_mod in modules){
+
+  print(paste0('mod: ', cur_mod))
+
+  cur_links <- top_link_df %>% subset(NMF_module == cur_mod & analysis == 'joint')
+  cur_genes <- cur_links$Peak1_nearestGene %>% unique %>% as.character
+
+  # run enrichr
+  cur_results <- enrichr(cur_genes, dbs)
+
+  for(db in dbs){
+    cur_results[[db]]$db <- db
+    cur_results[[db]]$NMF_module <- cur_mod
+    cur_results[[db]] <- cur_results[[db]] %>% subset(P.value <= 0.05)
+    print(dim(cur_results[[db]]))
+    combined_output <- rbind(combined_output, cur_results[[db]])
+  }
+}
+
+write.table(combined_output, file='data/NMF_target_gene_GO_terms.tsv', quote=FALSE, sep='\t')
+
+# remove the GO term ID number:
+combined_output$Term <- do.call(rbind, strsplit(combined_output$Term, '[(]GO:'))[,1]
+
+# plot GO term barplots
+combined_output$wrap <- wrapText(combined_output$Term,45)
+
+for(cur_mod in modules){
+
+  plot_df <- combined_output %>%
+    subset(NMF_module == cur_mod & db == 'GO_Biological_Process_2018') %>%
+    #top_n(-35, wt=P.value)
+    top_n(35, wt=Combined.Score)
+
+  p <- ggplot(plot_df, aes(x=log(Combined.Score), y=reorder(wrap, Combined.Score)))+
+    geom_bar(stat='identity', position='identity', color='black') +
+    theme(
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      legend.title = element_blank()
+    ) + ylab('') + xlab('log(Combined.Score)')
+
+  pdf(paste0('figures/GO_terms/NMF_module_', cur_mod, '.pdf'), width=6, height=20)
+  print(p)
+  dev.off()
+}
+
+top_modules_df
+
+
+## GO term heatmap:
+selected_modules <- c(25, 8, 16, 17, 27, 13)
+selected_terms <- c(
+  'cellular response to misfolded protein', # ASC module 25
+  'positive regulation of autophagosome maturation', # ASC module 25
+  'central nervous system projection neuron axonogenesis', # EX module 8
+  'amyloid precursor',
+  'neuron fate commitment', # INH module 16
+  'histone H3 deacetylation', # INH module 16
+  'mRNA methylation', # MG module 17
+  'negative regulation of vasculature development', # MG module 17
+  'regulation of amyloid fibril formation', # ODC module 27
+  'memory', # ODC module 27
+  'SREBP signaling pathway', # OPC module 13
+  'astrocyte activation' # OPC module 13
+)
+
+# subset for these terms and these modules:
+cur_mod_terms_df <- subset(combined_output, NMF_module %in% selected_modules)
+
+plot_df <- data.frame()
+for(term in selected_terms){
+  cur_df <- cur_mod_terms_df[grepl(term, cur_mod_terms_df$Term),]
+  plot_df <- rbind(plot_df, cur_df)
+}
+
+plot_df <- plot_df[!grepl('aspartic', plot_df$Term),]
+plot_df <- plot_df[,c('NMF_module', 'wrap', 'Combined.Score')]
+plot_df <- melt(plot_df, c('NMF_module', 'Combined.Score'))
+plot_df$NMF_module <- factor(as.character(plot_df$NMF_module), levels=c('25', '8', '16', '17', '27', '13'))
+plot_df$value <- factor(plot_df$value, levels=rev(unique(plot_df$value)))
+
+p <- ggplot(plot_df, aes(x=NMF_module, y=value, fill=log(Combined.Score))) +
+  geom_tile() +
+#  geom_text(aes(label=Significance)) +
+  scale_fill_gradient(low = "white", high = "seagreen", space = "Lab",
+    guide = guide_colorbar(barwidth=.5, barheight=7.5, ticks=FALSE)) +
+  xlab('') + ylab('') + labs(fill = "log(Combined.Score)") +
+  theme(
+    axis.text.x=element_text(angle=90, vjust=0.5),
+    panel.background=element_blank(),
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    plot.background=element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=0.5)
+  )
+
+  pdf(paste0('figures/GO_terms/NMF_module_heatmap.pdf'), width=10, height=6)
+  print(p)
+  dev.off()
+
+
+```
+
+
+Upset plot to show how many target genes are shared & how many are cell type specific
+
+```{r eval=FALSE}
+library(UpSetR)
+
+
+top_link_df$celltype <- as.character(top_link_df$celltype)
+top_link_df$target_gene <- factor(as.character(top_link_df$Peak1_nearestGene), levels=unique(top_link_df$Peak1_nearestGene))
+
+top_link_df$peak_gene <- paste0(top_link_df$Peak2, '_', top_link_df$Peak1_nearestGene)
+top_links_unique <- distinct(top_link_df, peak_gene, .keep_all=TRUE)
+
+
+# set up upset DF
+upset_list <- list()
+clusters <- unique(top_links_unique$celltype)
+for(ct in clusters){
+  test_df <- top_links_unique %>% subset(celltype == ct)
+  upset_list[[ct]] <- table(test_df$target_gene)
+}
+
+# combine into one df
+upset_df <- as.data.frame(Reduce(cbind, upset_list))
+colnames(upset_df) <- clusters
+
+# remove entries with all 0
+upset_df <- upset_df[rowSums(upset_df) > 0,]
+
+# convert to binary
+upset_df[upset_df > 0] <- 1
+
+cur_color_scheme <- unlist(color_scheme_snATAC_celltype)[colSums(upset_df) %>% order] %>% rev
+p <- upset(
+  upset_df,
+  sets=as.character(unique(top_link_df$celltype)),
+  group.by='sets',
+  cutoff=4,
+  sets.bar.color=cur_color_scheme,
+)
+
+
+pdf('figures/target_gene_upset.pdf', width=5, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+
+
+```
+
+Donut chart for number of enhancers in each category:
+```{r eval=FALSE}
+
+top_link_df$peak_gene <- paste0(top_link_df$Peak2, '_', top_link_df$Peak1_nearestGene)
+top_links_unique <- distinct(top_link_df, peak_gene, .keep_all=TRUE)
+
+data <- as.data.frame(table(top_links_unique$Peak2_type))
+colnames(data) <- c('category', 'count')
+
+table(top_links_unique$Peak2_type) / nrow(top_links_unique)
+
+# Compute percentages
+data$fraction <- data$count / sum(data$count)
+
+# Compute the cumulative percentages (top of each rectangle)
+data$ymax <- cumsum(data$fraction)
+
+# Compute the bottom of each rectangle
+data$ymin <- c(0, head(data$ymax, n=-1))
+
+# Compute label position
+data$labelPosition <- (data$ymax + data$ymin) / 2
+
+# Compute a good label
+data$label <- paste0(data$category, "\n ", data$count, ' peaks')
+
+# Make the plot
+pdf('figures/donut_peakType.pdf', width=5, height=4)
+ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=category)) +
+  geom_rect() +
+  #geom_text( x=2, aes(y=labelPosition, label=label, color=category), size=6) + # x here controls label position (inner / outer)
+  scale_fill_brewer(palette="Dark2") +
+  scale_color_brewer(palette="Dark2") +
+  coord_polar(theta="y") +
+  xlim(c(0, 4)) +
+  theme_void()
+dev.off()
+
+```
+
+- Histogram of the number of enhancers linked to each gene
+- Histogram of the number of genes linked to each enhancer
+
+```{r eval=FALSE}
+library(ggridges)
+
+top_link_df$peak_gene <- paste0(top_link_df$Peak2, '_', top_link_df$Peak1_nearestGene)
+top_links_unique <- distinct(top_link_df, peak_gene, .keep_all=TRUE)
+
+# how many
+length(unique(top_links_unique$Peak1_nearestGene))
+
+p <- ggplot(df, aes(x=Freq)) +
+  geom_histogram(colour="white", fill="black", bins=26)+
+  geom_vline(aes(xintercept=median(Freq)), linetype='dashed', color='gray', size=0.5) +
+  xlim(0,25) + ylab("N genes") + xlab("number of linked cCREs") +
+  theme(
+    panel.background=element_blank(),
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank()
+  ) + NoLegend()
+
+
+
+pdf('figures/ridgeplot_n_enhancers_per_gene.pdf', width=4, height=4)
+p
+dev.off()
+
+
+```
+
+Venn Diagrams showing number of genes overlapped between celltype gl-cCREs and DEGs
+
+```{r eval=FALSE}
+
+library(eulerr)
+library(GeneOverlap)
+
+fisher_df <- data.frame()
+for(cur_celltype in c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC')){
+
+  # get diagnosis DEGs for this celltype:
+  cur_degs <- celltype.diagnosis.markers %>% subset(cluster == 'AD' & celltype ==  cur_celltype & avg_logFC >= 0)
+
+  # get celltype degs for this celltype:
+  cur_celltype_degs <- celltype.markers %>% subset(cluster == cur_celltype & avg_logFC >= 0)
+
+  # get links:
+  cur_links <- top_link_df %>% subset( celltype == cur_celltype)
+
+  # overlap between links and diagnosis degs
+  diag_overlap_pval <- testGeneOverlap(newGeneOverlap(
+    cur_degs$gene,
+    unique(cur_links$Peak1_nearestGene),
+    genome.size=length(intersect(rownames(NucSeq), proj@peakSet$nearestGene))
+  ))@pval
+
+  celltype_overlap_pval <- testGeneOverlap(newGeneOverlap(
+    cur_celltype_degs$gene,
+    unique(cur_links$Peak1_nearestGene),
+    genome.size=length(intersect(rownames(NucSeq), proj@peakSet$nearestGene))
+  ))@pval
+
+  # update fisher df:
+  diag_df <- data.frame(pval = diag_overlap_pval, celltype=cur_celltype, type='diagnosis')
+  celltype_df <- data.frame(pval = celltype_overlap_pval, celltype=cur_celltype, type='celltype')
+
+  fisher_df <- Reduce(rbind, list(fisher_df, diag_df, celltype_df))
+
+  # set up relevant lists:
+  gene_set_list <- list(
+    'gl-cCREs' = as.character(unique(cur_links$Peak1_nearestGene)),
+    'celltype_DEGs' = as.character(cur_celltype_degs$gene),
+    'diagnosis_DEGs' = as.character(cur_degs$gene)
+  )
+  gene_set_list[['gl-cCREs_unique']]
+
+  venn_list <- list()
+  for(i in 1:length(gene_set_list)){
+    cur_genes <- gene_set_list[[i]]
+
+    other_indices <- (i:length(gene_set_list))[i:length(gene_set_list) != i]
+
+    # number of genes in cur set and not other sets:
+    venn_list[[names(gene_set_list)[i]]] <- sum(!(cur_genes %in% Reduce(union, gene_set_list[other_indices])))
+
+
+    for(j in other_indices){
+      other_genes <- gene_set_list[[j]]
+      venn_list[[paste0(names(gene_set_list)[i],'&',names(gene_set_list)[j])]] <- length(intersect(cur_genes, other_genes))
+    }
+  }
+
+  # number of genes in common between all sets:
+  venn_list[[paste0(names(gene_set_list)[1], '&', names(gene_set_list)[2], '&', names(gene_set_list)[3])]] <- length(Reduce(intersect, gene_set_list))
+
+  #
+
+
+  VennDiag <- euler(unlist(venn_list))
+
+  pdf(paste0('figures/venn_',cur_celltype,'.pdf'), width=6, height=6)
+  print(plot(
+    VennDiag, quantities=TRUE, counts = TRUE, font=1, cex=1, alpha=0.8,
+    fill=rep(color_scheme_snATAC_celltype[[cur_celltype]], 3)
+  ))
+  dev.off()
+}
+
+# add significance stars:
+fisher_df$significance <- stars.pval(fisher_df$pval)
+
+fisher_df$significance <- ifelse(
+  fisher_df$pval > 0.05, 'n.s.', ifelse(
+  fisher_df$pval >= 0.05, '*', ifelse(
+  fisher_df$pval >= 0.005, '**', '***'
+)))
+
+
+```
