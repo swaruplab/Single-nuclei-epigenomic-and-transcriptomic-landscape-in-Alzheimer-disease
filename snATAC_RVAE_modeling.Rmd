@@ -1,0 +1,1124 @@
+
+
+```{r eval=FALSE}
+library(Seurat)
+library(Signac)
+library(ArchR)
+library(Hmisc)
+library(scales)
+library(monocle3)
+library(cicero)
+library(ggpubr)
+library(future.apply)
+
+library(RColorBrewer)
+colfunc_peaks <- colorRampPalette(brewer.pal(9, 'RdPu' ))
+
+# load accessibility data
+NucSeq.atac <- readRDS(file='data/NucSeq_macs2Peaks_signac.rds')
+
+# load snRNA-seq seurat object:
+NucSeq <- readRDS('data/NucSeq_batch_correct_seurat.rds')
+
+
+# load ArchR project
+proj <- loadArchRProject(path = "ArchR3/all_samples/")
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), '-', start(proj@peakSet), '-', end(proj@peakSet))
+proj@peakSet$site_name2 <- paste0(as.character(seqnames(proj@peakSet)), ':', start(proj@peakSet), '-', end(proj@peakSet))
+
+# load gl-cCREs:
+load('data/link_df_merged.rda')
+load('data/top_link_df.rda')
+
+# load cluster DARs:
+load('data/cluster_DARs3.rda')
+
+# load all snRNA-seq DEGs:
+load('data/all_DEGs.rda')
+
+
+
+fig_dir <- 'figures/'
+data_dir <- 'data/reconstructed/'
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+
+
+```
+
+# load co-embdding obeject for a specific cell type
+```{r eval=FALSE}
+
+cur_celltype <- 'MG'
+cur_celltype <- 'ASC'
+cur_celltype <- 'ODC'
+
+dir.create(paste0(fig_dir, cur_celltype))
+
+cur_coembed <- readRDS(paste0('data/', cur_celltype,'_seurat_coembed.rds'))
+cur_cds <- readRDS(paste0('data/', cur_celltype,'_cds_coembed.rds'))
+
+# select partition 1:
+cur_cds <- order_cells(cur_cds,root_pr_nodes = get_earliest_principal_node(cur_cds,partition = 1))
+
+# subset data by genes that are variable in snRNA
+pData(cur_cds)$pseudotime <- pseudotime(cur_cds)
+cur_cds <- cur_cds[,is.finite(pseudotime(cur_cds))]
+
+cur_coembed <- cur_coembed[, colnames(cur_cds)]
+cur_coembed$pseudotime <- pData(cur_cds)$pseudotime
+
+# get gl-cCREs for this celltype:
+cur_links <- top_link_df %>% subset(celltype == cur_celltype)
+
+# for ODC, reverse the pseudotime trajectory
+# cur_coembed$pseudotime_original <- cur_coembed$pseudotime
+# cur_coembed$pseudotime <- (cur_coembed$pseudotime - max(cur_coembed$pseudotime)) *-1
+
+# plot UMAP:
+cur_coembed$UMAP1 <- cur_coembed@reductions$umap@cell.embeddings[,1]
+cur_coembed$UMAP2 <- cur_coembed@reductions$umap@cell.embeddings[,2]
+plot_df <- cur_coembed@meta.data
+
+# # for ODC, flip the UMAP1 coordinate
+# p <- ggplot(plot_df, aes(x=-1*UMAP1, y=UMAP2, color=pseudotime)) +
+#   geom_point(size=0.25) +
+#   scale_color_gradientn(colors=plasma(256)) + umap_theme+ NoLegend()
+#
+# png(paste0(fig_dir, cur_celltype, "/", cur_celltype,"_coembed_pseudotime.png"), width=5, height=3, res=1000, units='in')
+# p
+# dev.off()
+
+
+n_bins = 50
+cur_coembed$pseudotime_bin <-  cut2(as.numeric(cur_coembed$pseudotime), g=n_bins)
+
+# save cur_coembed
+saveRDS(cur_coembed, paste0(data_dir, cur_celltype, '_coembed_pseudotime_seurat.rds'))
+
+```
+
+Proportion of diagnosis in each pseudotime bin:
+
+```{r eval=FALSE}
+
+bins <- levels(cur_coembed$pseudotime_bin)
+
+proportion_df <- data.frame()
+for(i in 1:length(bins)){
+  bin = bins[i]
+
+  cur_meta <- subset(cur_coembed@meta.data, pseudotime_bin == bin)
+
+  cur_df <- data.frame(table(cur_meta$Diagnosis) / nrow(cur_meta))
+  cur_df <- cur_df %>% dplyr::rename(c(Diagnosis=Var1, proportion=Freq))
+  cur_df$bin_num <- i
+  cur_df$bin <- bin
+  proportion_df <- rbind(proportion_df, cur_df)
+
+}
+
+proportion_cor <- cor.test(
+  subset(proportion_df, Diagnosis=='AD') %>% .$bin_num,
+  subset(proportion_df, Diagnosis=='AD') %>% .$proportion,
+  method='pearson'
+)
+
+
+p <- ggplot(proportion_df, aes(x=bin_num, y=proportion, fill=Diagnosis, color=Diagnosis)) +
+  ylab('scaled feature') +
+  ggscatter(data=subset(proportion_df, Diagnosis=='AD')) +
+  #geom_smooth(se=FALSE) +
+  ylim(0.5,1)
+
+#  scale_color_manual(values=c('gray', 'seagreen'))
+
+p <- ggscatter(
+    subset(proportion_df, Diagnosis=='AD'),
+    x='bin_num', y='proportion', color=color_scheme_snATAC_celltype[cur_celltype],
+    #color=color_scheme_snATAC_celltype[cur_celltype],
+    add='reg.line',
+    add.params=list(color='black', fill='lightgray'),
+    conf.int=TRUE,
+    cor.coef=TRUE,
+    cor.coeff.args=list(method='pearson', label.sep='\n'),
+    alpha=0.5
+  ) + xlab('pseudotime') +
+  theme(
+    axis.ticks.x=element_blank(),
+    axis.text.x=element_blank()
+  )
+
+
+pdf(paste0(fig_dir, cur_celltype, '/', cur_celltype, '_diagnosis_proportion.pdf'), width=5, height=2)
+print(p)
+dev.off()
+
+
+```
+
+Gene score analysis (DAM, DAA)
+
+```{r eval=FALSE}
+
+# microglia ####################################################################
+homeostatic <- c('HEXB', 'CST3', 'CX3CR1', 'CSF1R', 'CTSS', 'TMSB4X', 'P2RY12', 'C1QB')
+stage1_DAM <- c('TYROBP', 'CTSB', 'APOE', 'B2M', 'FTH1', 'TREM2')
+stage2_DAM <- c('TREM2', 'AXL', 'CST7', 'CTSL', 'LPL', 'CD9', 'CSF1', 'ITGAX', 'CLEC7A', 'LILRB4', 'TIMP2')
+
+
+cur_coembed <- AddModuleScore(
+  cur_coembed,
+  features=list('stage1_DAM'=stage1_DAM, 'stage2_DAM'=stage2_DAM, 'homeostatic'=homeostatic),
+  pool = rownames(cur_coembed), k=F, nbin=24,
+  name=c('stage1_DAM', 'stage2_DAM', 'homeostatic')
+)
+
+
+DAM_modules <- select(cur_coembed@meta.data, c(pseudotime_bin, stage1_DAM1, stage2_DAM2, homeostatic3))
+DAM_modules$pseudotime_bin_num <- as.numeric(DAM_modules$pseudotime_bin)
+
+features <- c('stage1_DAM1', 'stage2_DAM2', 'homeostatic3')
+
+modules <- DAM_modules
+mod_colors <- c('yellow', 'orange', 'red')
+
+# Astrocytes ###################################################################
+astro_modules <- list(
+  'DAA' = c('GFAP', 'CSTB', 'VIM', 'OSMR', 'GSN', 'GGTA1P'),
+  'GFAP_low' = c('LUZP2', 'SLC7A10', 'MFGE8'),
+  'GFAP_high' = c('GFAP', 'ID3', 'AQP4', 'MYOC', 'ID1', 'FABP7')
+)
+
+cur_coembed <- AddModuleScore(
+  cur_coembed,
+  features=astro_modules,
+  pool = rownames(cur_coembed), k=F, nbin=24,
+  name=names(astro_modules)
+)
+
+
+modules <- select(cur_coembed@meta.data, c(pseudotime_bin, DAA1, GFAP_low2, GFAP_high3))
+modules$pseudotime_bin_num <- as.numeric(modules$pseudotime_bin)
+features <- c('DAA1', 'GFAP_low2', 'GFAP_high3')
+mod_colors <- c('darkorchid4', 'firebrick3', 'hotpink2')
+
+# ODCs #########################################################################
+oligo_modules <- list(
+  'NFOL'=c('TCF7L2', 'CASR', 'CEMIP2', 'ITPR2'),
+  'MFOL'=c('MAL', 'MOG', 'PLP1', 'OPALIN', 'SERINC5', 'CTPS1'),
+  'MOL'=c('KLK6', 'APOD', 'SLC5A11', 'PDE1A')
+)
+
+cur_coembed <- AddModuleScore(
+  cur_coembed,
+  features=oligo_modules,
+  pool = rownames(cur_coembed), k=F, nbin=24,
+  name=names(oligo_modules)
+)
+
+modules <- select(cur_coembed@meta.data, c(pseudotime_bin, NFOL1, MFOL2, MOL3))
+modules$pseudotime_bin_num <- as.numeric(modules$pseudotime_bin)
+features <- c('NFOL1', 'MFOL2', 'MOL3')
+mod_colors <- c('turquoise3', 'steelblue',  'springgreen3')
+
+
+# compute average expression of DAM modules in each pseudotime bin
+tmp <- lapply(1:max(modules$pseudotime_bin_num), function(i){
+  cur_df <- modules %>% subset(pseudotime_bin_num == i)
+
+  data.frame(
+    value=as.numeric(colSums(cur_df[,features]) / nrow(cur_df)),
+    bin_num = i,
+    feature = features
+  )
+})
+plot_df <- Reduce(rbind, tmp)
+
+
+p <- ggplot(plot_df, aes(bin_num, value, color=feature)) +
+  geom_hline(yintercept=0, linetype='dashed', color='gray', alpha=0.75) +
+  geom_point(size=1) +
+  geom_smooth() +
+  scale_color_manual(values=mod_colors) +
+  xlab('pseudotime') + ylab('module score') +
+
+  theme(
+    axis.ticks.x=element_blank(),
+    axis.text.x=element_blank()
+  ) + NoLegend()
+
+pdf(paste0(fig_dir, cur_celltype, '/', cur_celltype, '_module_trajectory.pdf'), width=5, height=2, useDingbats=FALSE)
+print(p)
+dev.off()
+
+```
+
+Bin TF information for this cluster
+```{r eval=FALSE}
+
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+
+coembed_atac_barcodes <- do.call(rbind, strsplit(rownames(subset(cur_coembed@meta.data, tech=='atac')), '_'))[,3]
+cur_atac_cortex <- NucSeq.atac[,coembed_atac_barcodes]
+cur_atac_cortex$pseudotime <- subset(cur_coembed@meta.data, tech=='atac') %>% .$pseudotime
+
+
+# take 50 pseudotime bins
+n_bins = 50
+cur_atac_cortex$pseudotime_bin <- cut2(as.numeric(cur_atac_cortex$pseudotime), g=n_bins)
+
+Idents(cur_atac_cortex) <- cur_atac_cortex$pseudotime_bin
+
+deviation_binned <- AverageExpression(cur_atac_cortex, assay='chromvar')$chromvar
+
+################################################################################
+# plot smoothed TF matrix for TFs of interest
+################################################################################
+load('data/diagnosis_da_motifs.rda')
+load('data/da_motifs.rda')
+da_motifs_celltypes$motif_name <- as.character(motif_names[da_motifs_celltypes$gene])
+diagnosis_da_motifs$motif_name <- as.character(motif_names[diagnosis_da_motifs$gene])
+
+# tfs to annotate:
+anno_tfs <- da_motifs_celltypes %>% subset(cluster == cur_celltype & avg_logFC >= 0)  %>% top_n(10, wt=avg_logFC) %>% .$motif_name
+anno_tfs <- c(anno_tfs, diagnosis_da_motifs %>% subset(cluster == 'AD' & celltype == cur_celltype & avg_logFC >= 0) %>% top_n(5, avg_logFC) %>% .$motif_name)
+anno_tfs <- c(anno_tfs, diagnosis_da_motifs %>% subset(cluster == 'AD' & celltype == cur_celltype & avg_logFC < 0) %>% top_n(-20, avg_logFC) %>% .$motif_name)
+
+# MG
+anno_tfs <- c(anno_tfs, c('CTCF', 'FOSL2'))
+anno_tfs <- unique(anno_tfs)
+
+# get TFs to plot
+celltype_tfs <- da_motifs_celltypes %>% subset(cluster == cur_celltype & avg_logFC >= 0)  %>% .$motif_name
+AD_up_tfs <- diagnosis_da_motifs %>% subset(cluster == 'AD' & celltype == cur_celltype & avg_logFC >= 0)  %>% .$motif_name
+AD_down_tfs <- diagnosis_da_motifs %>% subset(cluster == 'AD' & celltype == cur_celltype & avg_logFC < 0)  %>% .$motif_name
+
+tf_list <- list(
+  celltype = celltype_tfs,
+  AD_up = AD_up_tfs,
+  AD_down = AD_down_tfs
+)
+
+smoothed_tfs <- data.frame()
+for(cur_tfs in tf_list){
+
+  mat <- deviation_binned
+  rownames(mat) <- motif_names[rownames(mat)] %>% unlist %>% as.character
+
+  mat <- mat[cur_tfs,]
+
+  f <- function(x){
+    cur <- as.numeric(mat[x,])
+    cur_df <- data.frame(expression=cur, index=1:length(cur))
+    cur_loess <- loess(expression ~ index, data=cur_df, span=0.5) #ASC span=0.5
+    smoothed <- predict(cur_loess)
+    return(smoothed)
+  }
+
+  smoothed <- future_lapply(rownames(mat), f)
+  smoothed <- do.call(rbind, smoothed)
+  colnames(smoothed) <- colnames(mat)
+  rownames(smoothed) <- rownames(mat)
+  mat <- smoothed
+
+  range01 <- function(x){
+    cur <- mat[x,]
+    (cur-min(cur))/(max(cur)-min(cur))
+  }
+  scaled <- lapply(rownames(mat), range01)
+  scaled <- do.call(rbind, scaled)
+  rownames(scaled) <- rownames(mat)
+  # order rows by the time they reach 0.75% min expression
+  ordering <- future_lapply(1:nrow(scaled), function(i){
+    match(names(scaled[i,])[scaled[i,] >= 0.75][1], colnames(scaled))
+  })
+  ordered <- scaled[rownames(scaled)[order(unlist(ordering))],]
+  # reverse ordering
+
+  if(is.null(dim(ordered))){
+    df <- data.frame(cur_tf = ordered)
+    smoothed_tfs <- rbind(smoothed_tfs, t(df))
+  } else{
+    ordered <- ordered[rownames(ordered),]
+    smoothed_tfs <- rbind(smoothed_tfs, as.data.frame(ordered))
+  }
+}
+
+# split rows by tf list:
+row_split <- sapply(1:length(tf_list), function(i){rep(names(tf_list)[[i]], length(tf_list[[i]]))}) %>% unlist
+
+
+# set up labels
+tf_indices <- c()
+tf_labels <- c()
+for(gene in anno_tfs){
+
+  # boolean array to index rows where this gene is present
+  gene_index <- grepl(gene, as.character(rownames(smoothed_tfs)))
+  gene_index <- (1:nrow(smoothed_tfs))[gene_index]
+
+  # indices:
+  tf_indices <- c(tf_indices, gene_index)
+
+  # labels:
+  tf_labels <- c(tf_labels, rep(gene, length(gene_index)))
+
+}
+
+ha = rowAnnotation(
+  foo = anno_mark(
+    at = tf_indices, labels = tf_labels
+))
+
+
+# plot heatmap
+colfunc <- colorRampPalette(rev(brewer.pal(11, 'Spectral' )))
+pdf(paste0(fig_dir, cur_celltype, '/', cur_celltype, '_TF_binned_heatmap.pdf'), width=4, height=8)
+ComplexHeatmap::Heatmap(
+  as.matrix(smoothed_tfs),
+  show_column_names = FALSE, show_row_names=FALSE,
+  col = colfunc(256),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  row_split = row_split,
+  right_annotation=ha,
+  #left_annotation=color_ha,
+  use_raster = TRUE
+)
+dev.off()
+
+
+```
+
+
+Save snRNA pseudo-bulk aggregates in pseudotime bin for VAE modeing
+
+```{r eval=FALSE}
+
+library(Hmisc)
+library(scales)
+
+# take 50 pseudotime bins
+n_bins = 50
+cur_coembed$pseudotime_bin <- cut2(as.numeric(cur_coembed$pseudotime), g=n_bins)
+
+################################################################################
+# pseudo-bulk for pseudotime DEGs:
+################################################################################
+
+outdir <- '~/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/RVAgene/RVAgene/data/'
+cur_name <- paste0(cur_celltype,'_pseudotime_DEGs')
+dir.create(paste0(outdir, cur_name))
+
+# load pseudotime DEGs:
+load(paste0('data/',cur_celltype,'_coembed_pseudotime_terms_genes.rda'))
+
+# smooth pseudotime genes
+pseudotime_genes <- as.character(pseudotime_table$GeneSymbol)
+
+# average expression over pseudotime bins:
+Idents(cur_coembed) <- cur_coembed$pseudotime_bin
+average_exp <- AverageExpression(cur_coembed, slot='data', assay='RNA', features=pseudotime_genes)
+average_exp <- average_exp$RNA
+
+# rescale each gene between -1 and 1:
+scaled_exp <- sapply(1:nrow(average_exp), function(i) rescale(as.numeric(average_exp[i,]), to=c(-1,1))) %>% t %>% as.data.frame
+rownames(scaled_exp) <- rownames(average_exp)
+average_exp <- scaled_exp
+
+# pad with zeros to work with RVAgene:
+average_exp <- cbind(rep(0, nrow(average_exp)), average_exp)
+
+# write to ourput file
+write.table(average_exp, file=paste0(outdir, cur_name, '/', cur_name, '_TRAIN'), sep=',',quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(average_exp, file=paste0(outdir, cur_name, '/', cur_name, '_TEST'), sep=',',quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(as.data.frame(rownames(average_exp)), file=paste0(outdir, cur_name, '/feature_names.csv' ), sep=',',quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+
+```
+
+Plot reconstructed expression heatmap:
+
+```{r eval=FALSE}
+
+library(ComplexHeatmap)
+library(future.apply)
+library(viridis)
+
+fig_dir <- 'RVAgene/RVAgene/figures/'
+data_dir <- 'RVAgene/RVAgene/data/reconstructed/'
+
+# get Diagnosis DEGs for this celltype, to annotate the heatmap:
+n_diagnosis_degs <- 5; n_cluster_degs <- 5 # MG /ASC
+# n_diagnosis_degs <- 2; n_cluster_degs <- 2 # ODC
+
+cur_diagnosis_markers <- cluster.diagnosis.markers %>%
+  subset(cluster == 'AD' & avg_logFC >= 0 & grepl(cur_celltype, celltype))
+
+cur_cluster_markers <- cluster.markers %>%
+  subset(avg_logFC >= 0 & grepl(cur_celltype, cluster))
+
+# get list of all genes that are up in cluster or in Diagnosis
+cur_diagnosis_genes <- cur_diagnosis_markers %>%
+  group_by(celltype) %>%
+  top_n(10, wt=avg_logFC) %>%
+  .$gene %>% unique
+
+cur_cluster_genes <- cur_cluster_markers %>%
+  group_by(cluster) %>%
+  top_n(10, wt=avg_logFC) %>%
+  .$gene %>% unique
+
+# get list of genes to annotate on heatmap
+cur_diagnosis_anno_genes <- cur_diagnosis_markers %>%
+  group_by(celltype) %>%
+  top_n(n_diagnosis_degs, wt=avg_logFC) %>%
+  .$ gene %>% unique
+
+cur_cluster_anno_genes <- cur_cluster_markers %>%
+  group_by(cluster) %>%
+  top_n(n_cluster_degs, wt=avg_logFC) %>%
+  .$ gene %>% unique
+
+cur_anno_genes <- c(cur_diagnosis_anno_genes, cur_cluster_anno_genes) %>% unique
+length(cur_anno_genes)
+
+# add other genes:
+add_genes <- c('APOE', 'SPI1', 'ETS1', 'CSF1R', 'CD74', 'P2RY12') #MG
+add_genes <- c('GFAP') #ASC
+add_genes <- c('MBP', 'MOBP', 'OPALIN', 'PLP1', 'CNP')
+cur_anno_genes <- c(cur_anno_genes, add_genes) %>% unique
+
+# load reconstructed data and z embedding
+dataset = paste0(cur_celltype,"_pseudotime_DEGs")
+recon_df <- read.table(paste0(data_dir,dataset,'_recon.csv'), sep=',', row.names=1, header=TRUE)
+z_df <- recon_df[,(ncol(recon_df)-2):ncol(recon_df)]
+recon_df <- recon_df[,1:(ncol(recon_df)-3)]
+z_df$gene <- rownames(z_df)
+
+range01 <- function(x){
+  cur <- recon_df[x,]
+  (cur-min(cur))/(max(cur)-min(cur))
+}
+scaled <- lapply(rownames(recon_df), range01)
+scaled <- do.call(rbind, scaled)
+rownames(scaled) <- rownames(recon_df)
+
+
+# order rows by the time they reach 0.75% min expression
+ordering <- future_lapply(1:nrow(scaled), function(i){
+  match(names(scaled[i,])[scaled[i,] >= 0.75][1], colnames(scaled))
+})
+ordered <- scaled[rownames(scaled)[order(unlist(ordering))],]
+
+# reverse ordering
+ordered <- ordered[rownames(ordered),]
+
+# color from k-means clustering
+color_ha <- rowAnnotation(
+  k_means = as.character(z_df$cluster[match(rownames(ordered), rownames(z_df))])
+)
+
+# label diagnosis cluster DEGs
+AD_degs_indices = na.omit(match(cur_anno_genes, rownames(ordered)))
+AD_degs_labels = cur_anno_genes[cur_anno_genes %in% rownames(ordered)]
+AD_degs_colors = rep('blue', length(AD_degs_labels))
+names(AD_degs_colors) <- AD_degs_labels
+ha = rowAnnotation(
+  foo = anno_mark(
+    at = AD_degs_indices, labels = AD_degs_labels
+), col=list(foo=AD_degs_colors))
+
+
+# plot heatmap
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_recon_heatmap.pdf'), width=4, height=8)
+ComplexHeatmap::Heatmap(
+  as.matrix(ordered),
+  show_column_names = FALSE, show_row_names=FALSE,
+  col = viridis(256),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  right_annotation=ha,
+  left_annotation=color_ha,
+  use_raster = TRUE
+)
+dev.off()
+
+
+################################################################################
+# plot latent space colored by pseudotime rank
+################################################################################
+
+z_df$rank <- match(rownames(z_df), rownames(ordered))
+
+p <- ggplot(z_df, aes(Z1, Z2, color=rank)) +
+  geom_point() +
+  scale_color_gradientn(colors=plasma(256),guide = guide_colorbar(barwidth=0.5, barheight=10, ticks=FALSE)) + labs(color='trajectory\nrank')
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_Z_rank.pdf'), width=4, height=4, useDingbats=FALSE)
+p + umap_theme
+dev.off()
+
+
+```
+
+Compute GO terms for pseudotime groups:
+
+```{r eval=FALSE}
+
+################################################################################
+# GO Enrichment
+################################################################################
+library(enrichR)
+
+# GO databases to query
+dbs <- c('GO_Biological_Process_2018','GO_Cellular_Component_2018',
+         'GO_Molecular_Function_2018')
+
+wrapText <- function(x, len) {
+   sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+collapsed_output <- data.frame()
+for(i in 1:length(regroup_genes)){
+
+  print(i)
+  # run enrichR on different gene sets:
+  cur_result <- enrichr(regroup_genes[[i]], dbs)
+
+  # collapse results into one dataframe
+  for(db in dbs){
+    cur_result[[db]]$cluster <- cur_celltype
+    cur_result[[db]]$db <- db
+    cur_result[[db]]$pseudotime_group <- i
+    collapsed_output <- rbind(collapsed_output, cur_result[[db]])
+  }
+}
+
+
+# plot GO terms
+dir.create(paste0(fig_dir, cur_celltype, '/GO_terms'))
+
+collapsed_output$wrap <- wrapText(collapsed_output$Term,45)
+
+# plot bar plots of top 25 terms by p val for each group
+for(group in unique(collapsed_output$pseudotime_group)){
+
+  plot_df <- collapsed_output %>%
+    subset(pseudotime_group == group & db == 'GO_Biological_Process_2018') %>%
+    top_n(-25, wt=P.value)
+
+  p <- ggplot(plot_df, aes(x=log(Combined.Score), y=reorder(wrap, Combined.Score)))+
+    geom_bar(stat='identity', position='identity', color='black') +
+    theme(
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      legend.title = element_blank()
+    ) + ylab('') + xlab('log(Combined.Score)')
+
+  pdf(paste0(fig_dir, cur_celltype, '/GO_terms/group_', group, '_terms.pdf'), width=6, height=12)
+  print(p)
+  dev.off()
+}
+
+# plot dot plot of top 10 terms in each group:
+cur_terms <- collapsed_output %>%
+  subset(db == 'GO_Biological_Process_2018' & P.value <= 0.05) %>%
+  group_by(pseudotime_group) %>%
+  top_n(10, wt=-P.value)
+cur_terms$Term <- as.character(do.call(rbind, strsplit(cur_terms$Term, '[(]GO:'))[,1])
+cur_terms$Term <- factor(cur_terms$Term, levels=unique(cur_terms$Term))
+cur_terms$logp <- -1*log(as.numeric(cur_terms$P.value))
+cur_terms$wrap <- wrapText(cur_terms$Term, 45)
+cur_terms$wrap <- factor(cur_terms$wrap, levels=rev(unique(cur_terms$wrap)))
+
+colfunc_modules <-  colorRampPalette((brewer.pal(9, 'GnBu' )[3:9]))
+
+pdf(paste0(fig_dir, cur_celltype, '/GO_terms/', cur_celltype, '_GO_term_dotplot.pdf'), width=8, height=12, useDingbats=FALSE)
+g <- ggplot(data=cur_terms, aes(pseudotime_group, wrap)) +
+  geom_point(aes(col=logp, size=Combined.Score)) +
+  scale_size(range=c(3,10)) +
+  scale_color_gradientn(colors=colfunc_modules(256)) +
+  theme(
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.line = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.border = element_rect(color='black', fill=NA, size=1)
+  ) +
+  ylab('') + xlab('')
+print(g)
+dev.off()
+
+# save GO terms table:
+write.table(collapsed_output, file=paste0(data_dir,cur_celltype,'_reconstructed_GO_terms.tsv'), quote=F, sep='\t', row.names=FALSE)
+
+# re-load go terms
+collapsed_output <- read.table(paste0(data_dir,cur_celltype,'_reconstructed_GO_terms.tsv'), sep='\t', stringsAsFactors=FALSE)
+
+
+```
+
+Correlate TFs with recon df:
+```{r eval=FALSE}
+
+plan(multicore)
+
+# identify the top motifs for this celltype: ###################################
+cur_seurat_atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+cur_seurat_atac <- FindTopFeatures(
+  cur_seurat_atac,
+  min.cutoff=ncol(cur_seurat_atac)*0.05 # present in 10% of cells
+)
+length(VariableFeatures(cur_seurat_atac))
+
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+motifs.use <- names(motif_names)
+cur_motif_accessible <- Motifs(NucSeq.atac)@data[proj@peakSet$peakType == 'Promoter' & rownames(cur_seurat_atac) %in% VariableFeatures(cur_seurat_atac),motifs.use]
+
+
+# number of total binding sites for each TF:
+bs_accessible <- Motifs(NucSeq.atac)@data[proj@peakSet$peakType == 'Promoter',]
+n_bs <- colSums(bs_accessible)
+n_accessible_bs <- colSums(cur_motif_accessible)
+df <- data.frame(value = n_accessible_bs / n_bs)
+df$percent <- df$value * 100
+df$motif_name <- as.character(motif_names)
+
+# only take top motifs:
+cur_motif_accessible <- cur_motif_accessible[,rownames(df)[df$value >= quantile(df$value, 0.65)]]
+
+
+cur_motif_names <- as.character(motif_names)
+
+deviation_binned <- deviation_binned_full
+
+# compute correlation between gene exp and TF enrichment
+cor_mat <- future_sapply(1:nrow(recon_df), function(i){
+  print(i)
+  sapply(1:nrow(deviation_binned), function(j){
+  cor(as.numeric(recon_df[i,]), as.numeric(deviation_binned[j,]))
+})})
+
+
+colnames(cor_mat) <- rownames(recon_df)
+rownames(cor_mat) <- as.character(motif_names)
+cor_mat <- t(cor_mat)
+
+# order genes
+cor_mat <- cor_mat[rownames(ordered),]
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_TF_corr_heatmap.pdf'), width=4, height=8)
+ComplexHeatmap::Heatmap(
+  cor_mat,
+  show_column_names = FALSE, show_row_names=FALSE,
+  col = rev(brewer.pal(11, 'Spectral')),
+  cluster_rows=FALSE,
+  cluster_columns=TRUE,
+  use_raster=TRUE
+)
+dev.off()
+
+
+# plot TF correlations on the Z-embedding ######################################
+
+library(ggrepel)
+dir.create(paste0(fig_dir, cur_celltype, '/TF_correlations'))
+
+da_motifs_celltypes$motif_name <- motif_names[da_motifs_celltypes$gene]
+diagnosis_da_motifs$motif_name <- motif_names[diagnosis_da_motifs$gene]
+
+# select motifs:
+other_tfs <- c('STAT3') # ASC
+other_tfs <- c()
+other_tfs <- c('SREBF1')
+
+tf_list_celltype <- da_motifs_celltypes %>% subset(cluster==cur_celltype & avg_logFC >= 0) %>%
+  top_n(20, wt=avg_logFC) %>% .$motif_name %>% as.character
+
+tf_list_up_AD <- diagnosis_da_motifs %>%
+  subset(cluster=='AD' & celltype==cur_celltype & avg_logFC >=0) %>%
+  top_n(10, wt=avg_logFC) %>% .$motif_name %>% as.character
+
+tf_list_down_AD <- diagnosis_da_motifs %>%
+  subset(cluster=='AD' & celltype==cur_celltype & avg_logFC <0) %>%
+  top_n(10, wt=-avg_logFC) %>% .$motif_name %>% as.character
+
+tf_list <- c(tf_list_celltype, tf_list_up_AD, tf_list_down_AD, other_tfs) %>% unique
+
+# get matrix of motif binding sites
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+motifs.use <- names(motif_names)
+cur_promoter_motif_accessible <- Motifs(NucSeq.atac)@data[proj@peakSet$peakType == 'Promoter' ,]
+colnames(cur_promoter_motif_accessible) <- as.character(motif_names)
+cur_linked_motif_accessible <- Motifs(NucSeq.atac)@data[proj@peakSet$site_name2 %in% cur_links$Peak2,]
+colnames(cur_linked_motif_accessible) <- as.character(motif_names)
+
+# what genes have a binding site
+plot_df <- data.frame()
+for(cur_tf in tf_list){
+  print(cur_tf)
+  cur_df <- z_df
+
+  # which genes have a binding site for this TF?
+  cur_promoter_bs <- rownames(cur_promoter_motif_accessible)[cur_promoter_motif_accessible[,cur_tf] > 0]
+
+  # which genes have a link to an enhancer with a binding site to this TF?
+  cur_enhancer_bs <- rownames(cur_linked_motif_accessible)[cur_linked_motif_accessible[,cur_tf] >0]
+
+  # what genes do these correpsond to?
+  cur_promoter_bs_genes <- subset(proj@peakSet, site_name %in% cur_promoter_bs) %>% .$nearestGene %>% as.character
+  cur_enhancer_bs_genes <- subset(proj@peakSet, site_name %in% cur_enhancer_bs) %>% .$nearestGene %>% as.character
+
+  cur_bs_genes <- c(cur_promoter_bs_genes, cur_enhancer_bs_genes) %>% unique
+
+
+  cur_df$bs <- cur_df$gene %in% cur_bs_genes
+
+  cur_df$bs_group <- ifelse(!cur_df$bs, NA, ifelse(
+    cur_df$gene %in% cur_promoter_bs_genes & cur_df$gene %in% cur_enhancer_bs_genes, 'both', ifelse(
+    cur_df$gene %in% cur_promoter_bs_genes, 'promoter', ifelse(
+      cur_df$gene %in% cur_enhancer_bs_genes, 'enhancer', NA
+  ))))
+
+  # set shapes based on bs group:
+  if(sum(na.omit(cur_df$bs_group) == 'both') == 0){
+    shapes = c(15,16)
+  } else{
+    shapes = c(8,15,16)
+  }
+
+  cur_df$variable <- cur_tf
+  cur_df$value <- as.numeric(cor_mat[z_df$rank, cur_tf])
+
+  # label genes that are in our previous annotation list:
+  cur_df$anno <- ifelse(cur_df$gene %in% cur_cluster_genes | cur_df$gene %in% cur_diagnosis_genes, cur_df$gene, NA)
+  cur_df$anno_group <- ifelse(
+    cur_df$gene %in% cur_diagnosis_genes, "#E87D72", ifelse(
+    cur_df$gene %in% cur_cluster_genes,as.character(color_scheme_snATAC_celltype[cur_celltype]),'white'
+  ))
+
+  plot_df <- rbind(plot_df, cur_df)
+
+  # limit of color scale:
+  limits <- max(abs(min(cur_df$value)), max(cur_df$value))
+  limits <- c(-1*limits, limits)
+
+  p <- ggplot(subset(cur_df, bs), aes(Z1, Z2, color=value, shape=bs_group)) +
+    geom_point(inherit.aes=FALSE, data=subset(cur_df, !bs), aes(Z1,Z2), color='gray', alpha=0.25, size=0.5) +
+    geom_point(size=2) +
+    scale_shape_manual(values=shapes) +
+    geom_text_repel(
+      aes(label=anno), color=subset(cur_df, bs) %>% .$anno_group) +
+    scale_color_gradientn(
+      colors=rev(brewer.pal(11, 'Spectral')),
+      limit = limits,
+      guide = guide_colorbar(barwidth=0.5, barheight=10, ticks=FALSE)
+    ) +
+    labs(color=paste0(cur_tf,'\ntrajectory\ncorrelation'),shape='')
+
+  pdf(paste0(fig_dir, cur_celltype, '/TF_correlations/', dataset, '_Z_', cur_tf,'_correlation.pdf'), width=4, height=4, useDingbats=FALSE)
+  print(p  + umap_theme)
+  dev.off()
+
+}
+
+sum(plot_df$anno_group !='white')
+sum(!is.na(plot_df$anno))
+
+
+```
+
+Plot motif logos for selected motifs
+```{r eval=FALSE}
+
+# MG
+cur_motif <- 'SPI1'
+cur_motif <- 'ETV5'
+
+# ASC:
+cur_motif <- 'STAT3'; cur_motif_ID <- 'MA0144.2'
+cur_motif <- 'FOSL2'; cur_motif_ID <- 'MA0478.1'
+cur_motif <- 'CTCF'; cur_motif_ID <- "MA0139.1"
+
+# ODC:
+cur_motif <- 'SREBF1';
+cur_motif <- 'NRF1';
+
+cur_motif_ID <- names(motif_names[grepl(cur_motif, as.character(motif_names))])
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_', cur_motif,'_motifplot.pdf'), width=4, height=2)
+MotifPlot(
+  object = NucSeq.atac,
+  motifs = cur_motif_ID
+)
+dev.off()
+
+```
+
+correlate diagnosis proportion with exp
+
+```{r eval=FALSE}
+
+prop_cor <- sapply(1:nrow(recon_df), function(i){
+  cor(as.numeric(recon_df[i,]), subset(proportion_df, Diagnosis=='AD') %>% .$proportion)
+})
+names(prop_cor) <- rownames(recon_df)
+
+plot_df <- z_df
+plot_df$value <- prop_cor
+
+p <- ggplot(plot_df, aes(Z1, Z2, color=value)) +
+  geom_point(size=2) +
+  scale_color_gradient2(
+    low="#55BCC2", mid='white', high="#E87D72",
+    guide = guide_colorbar(barwidth=0.5, barheight=10, ticks=FALSE)
+  ) +
+  labs(color=paste0('diagnosis\ncorrelation'),shape='')
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_Z_correlation_diagnosis.pdf'), width=4, height=4, useDingbats=FALSE)
+p + umap_theme
+dev.off()
+
+```
+
+Animated plot of gene expression in Z space
+
+```{r eval=FALSE}
+
+library(gganimate)
+
+plot_df <- recon_df
+colnames(plot_df) <- 1:ncol(plot_df)
+
+plot_df <- cbind(z_df, plot_df)
+plot_df <- melt(plot_df, c('Z1', 'Z2', 'cluster', 'rank', 'gene'))
+
+anim <- ggplot(plot_df, aes(x = Z1, y = Z2)) +
+  geom_point(aes(colour = value), size = 2) +
+  scale_color_viridis(guide = guide_colorbar(barwidth=0.5, barheight=10, ticks=FALSE)) +
+  labs(color='VAE\nreconstructed\nexpression') +
+  umap_theme +
+  transition_states(variable,
+                    transition_length = 2,
+                    state_length = 1)
+
+animate(anim, duration = 5, fps = 20, width = 5, height = 5, units='in', res=300, renderer = gifski_renderer())
+
+anim_save(paste0(fig_dir, cur_celltype, '/', dataset,'Z_expression.gif'))
+
+
+# animated UMAP highlighting cells of interest
+library(gghighlight)
+
+cur_coembed$UMAP1 <- cur_coembed@reductions$umap@cell.embeddings[,1]
+cur_coembed$UMAP2 <- cur_coembed@reductions$umap@cell.embeddings[,2]
+
+plot_df <- cur_coembed@meta.data %>% select(c(UMAP1, UMAP2, pseudotime_bin))
+plot_df$pseudotime_bin_num <- as.numeric(plot_df$pseudotime_bin)
+
+tmp <- lapply(1:max(plot_df$pseudotime_bin_num), function(i){
+  cur_df <- plot_df
+  cur_df$pseudotime_bin_num <- i
+  cur_df
+})
+bg_df <- Reduce(rbind, tmp)
+
+bg_df <- plot_df
+bg_df <- rename(bg_df, x=UMAP1, y=UMAP2)
+
+p <- ggplot(plot_df, aes(UMAP1, UMAP2, color=pseudotime_bin_num)) +
+  geom_point(inherit.aes=FALSE, data=bg_df, aes(UMAP1,UMAP2), color='gray', alpha=0.75, size=1) +
+  geom_point() +
+  scale_color_gradientn(colors=plasma(256), guide = guide_colorbar(barwidth=10, barheight=0.5, ticks=FALSE)) +
+  umap_theme + theme(legend.position='bottom') + labs(color='pseudotime') +
+  transition_states(
+    pseudotime_bin_num,
+    transition_length = 2,
+    state_length = 1)
+
+animate(p, duration = 5, fps = 20, width = 5, height = 5, units='in', res=300, renderer = gifski_renderer())
+
+anim_save(paste0(fig_dir, dataset,'_UMAP_highlight.gif'))
+
+
+```
+
+Save snATAC pseudo-bulk aggregates in pseudotime bin for VAE modeing
+
+```{r eval=FALSE }
+
+# subset by cell type
+cur_atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+
+# subset by cells in coembed pseudotime:
+coembed_cellnames <- sub('.', '', colnames(cur_coembed))
+coembed_atac_cellnames <- coembed_cellnames[grepl('atac', coembed_cellnames)]
+
+# remove cells that aren't in co-embedding
+cur_atac<- RenameCells(cur_atac, add.cell.id='atac')
+coembed_atac_cellnames <- coembed_atac_cellnames[coembed_atac_cellnames %in% colnames(cur_atac)]
+cur_atac <- cur_atac[,colnames(cur_atac) %in% coembed_cellnames]
+
+all.equal(coembed_atac_cellnames, colnames(cur_atac))
+
+# add relevant metadata:
+cur_atac$pseudotime <- cur_coembed@meta.data[paste0('_', coembed_atac_cellnames),] %>% .$pseudotime
+
+# compute pseudotime bins:
+n_bins = 50
+cur_atac$pseudotime_bin <- cut2(cur_atac$pseudotime, g=n_bins)
+
+# compute top features for this group:
+cur_atac <- FindTopFeatures(cur_atac, min.cutoff=ncol(cur_atac)*0.05)
+
+cur_promoters <- rownames(cur_atac)[proj@peakSet$peakType == 'Promoter' & rownames(cur_atac) %in% VariableFeatures(cur_atac)]
+
+################################################################################
+# pseudo-bulk linked enhancers
+################################################################################
+
+outdir <- 'RVAgene/RVAgene/data/'
+cur_name <- paste0(cur_celltype, '_enhancers')
+dir.create(paste0(outdir, cur_name))
+
+# get enhancer & promoter links for this celltype:
+cur_enhancer_link_df <- subset(top_link_df, celltype == cur_celltype)
+cur_enhancers <- cur_enhancer_link_df %>%
+  .$Peak2 %>% unique %>% as.character
+cur_enhancers <- sub(':', '-', cur_enhancers)
+
+cur_peaks <- c(cur_promoters, cur_enhancers)
+
+# average expression over pseudotime bins:
+Idents(cur_atac) <- cur_atac$pseudotime_bin
+acc <- AverageExpression(cur_atac, slot='data', assay='peaks', features=sub(':', '-', cur_peaks))
+acc <- acc$peaks
+
+# rescale each gene between -1 and 1:
+scaled_acc <- sapply(1:nrow(acc), function(i) rescale(as.numeric(acc[i,]), to=c(-1,1))) %>% t %>% as.data.frame
+rownames(scaled_acc) <- rownames(acc)
+
+# add zero padding
+scaled_acc <- cbind(rep(0, nrow(scaled_acc)), scaled_acc)
+
+# write files
+write.table(scaled_acc, file=paste0(outdir, cur_name, '/', cur_name, '_TRAIN'), sep=',',quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(scaled_acc, file=paste0(outdir, cur_name, '/', cur_name, '_TEST'), sep=',',quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(as.data.frame(rownames(acc)), file=paste0(outdir, cur_name, '/feature_names.csv' ), sep=',',quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+```
+
+Plot reconstructed accessibility heatmap:
+
+```{r eval=FALSE}
+
+
+dataset = "MG_enhancers"
+dataset = "ASC_enhancers"
+dataset = "ODC_enhancers"
+
+
+# load recon df
+recon_df <- read.table(paste0(data_dir,dataset,'_recon.csv'), sep=',', row.names=1, header=TRUE)
+z_df <- recon_df[,(ncol(recon_df)-1):ncol(recon_df)]
+recon_df <- recon_df[,1:(ncol(recon_df)-2)]
+
+# subset by pseudotime DARs
+#recon_df <- recon_df[rownames(recon_df) %in% as.character(pseudotime_table$site_name),]
+
+range01 <- function(x){
+  cur <- recon_df[x,]
+  (cur-min(cur))/(max(cur)-min(cur))
+}
+scaled <- future_lapply(rownames(recon_df), range01)
+scaled <- do.call(rbind, scaled)
+rownames(scaled) <- rownames(recon_df)
+
+# order rows by the time they reach 0.75% min expression
+ordering <- future_lapply(1:nrow(scaled), function(i){
+  match(names(scaled[i,])[scaled[i,] >= thresh][1], colnames(scaled))
+})
+ordered <- scaled[rownames(scaled)[order(unlist(ordering))],]
+
+# reverse ordering
+ordered <- ordered[rownames(ordered),]
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_recon_heatmap.pdf'), width=4, height=8)
+ComplexHeatmap::Heatmap(
+  as.matrix(ordered)[rownames(ordered) %in% cur_enhancers,],
+  show_column_names = FALSE, show_row_names=FALSE,
+  col = colfunc_peaks(256),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  use_raster=TRUE
+)
+dev.off()
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_promoter_recon_heatmap.pdf'), width=4, height=8)
+ComplexHeatmap::Heatmap(
+  as.matrix(ordered)[rownames(ordered) %in% cur_promoters,],
+  show_column_names = FALSE, show_row_names=FALSE,
+  col = colfunc_peaks(256),
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  use_raster=TRUE
+)
+dev.off()
+
+```
+
+Plot Z embeddings for enhancers:
+
+```{r eval=FALSE}
+
+# feature rank Z embedding
+
+z_df$rank <- match(rownames(z_df), rownames(ordered))
+
+p <- ggplot(z_df[rownames(z_df) %in% cur_enhancers,], aes(Z1, Z2, color=rank)) +
+  geom_point() +
+  scale_color_gradientn(colors=plasma(256),guide = guide_colorbar(barwidth=0.5, barheight=10, ticks=FALSE)) + labs(color='trajectory\nrank')
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_Z_rank.pdf'), width=4, height=4, useDingbats=FALSE)
+p + umap_theme
+dev.off()
+
+# diagnosis correlation Z embedding
+
+prop_cor <- sapply(1:nrow(recon_df), function(i){
+  cor(as.numeric(recon_df[i,]), subset(proportion_df, Diagnosis=='AD') %>% .$proportion)
+})
+names(prop_cor) <- rownames(recon_df)
+
+plot_df <- z_df
+plot_df$value <- prop_cor
+plot_df <- plot_df[rownames(plot_df) %in% cur_enhancers,]
+
+p <- ggplot(plot_df, aes(Z1, Z2, color=value)) +
+  geom_point(size=2) +
+  scale_color_gradient2(
+    low="#55BCC2", mid='white', high="#E87D72",
+    guide = guide_colorbar(barwidth=0.5, barheight=10, ticks=FALSE)
+  ) +
+  labs(color=paste0('diagnosis\ncorrelation'),shape='')
+
+pdf(paste0(fig_dir, cur_celltype, '/', dataset, '_Z_correlation_diagnosis.pdf'), width=4, height=4, useDingbats=FALSE)
+p + umap_theme
+dev.off()
+
+```
