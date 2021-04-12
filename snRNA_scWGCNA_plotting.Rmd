@@ -1,0 +1,417 @@
+
+```{r eval=FALSE}
+library(Seurat)
+library(dplyr)
+library(cowplot)
+library(tidyverse)
+library(viridis)
+library(RColorBrewer)
+theme_set(theme_cowplot())
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  legend.position="none",
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+fig_dir <- 'figures/'
+data_dir <- 'data/'
+
+NucSeq <- readRDS('celltype-analysis/data/NucSeq_batch_correct_seurat.rds')
+
+
+```
+
+
+## Plot GO terms
+
+```{r eval=FALSE}
+
+# helper fucntion
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+# color scheme
+colfunc <- colorRampPalette((brewer.pal(9, 'GnBu' )[3:9]))
+
+# Inh terms:
+cur_terms <- read.csv('data/IMsEnrichR_output.csv') %>% na.omit
+cur_terms$GO.Terms <- do.call(rbind, strsplit(cur_terms$GO.Terms, '[(]GO:'))[,1]
+
+cur_terms$wrap <- wrapText(cur_terms$GO.Terms, 45)
+cur_terms$wrap <- factor(cur_terms$wrap, levels=rev(unique(cur_terms$wrap)))
+
+pdf(paste0('figures/INH_GO_terms.pdf'), width=7, height=10, useDingbats=FALSE)
+cur_terms %>%
+  ggplot(aes(Module, wrap)) +
+  geom_point(aes(col=-log(Pval), size=Combined.Zscore)) +
+  scale_size(range=c(3,10)) +
+  scale_color_gradientn(colors=colfunc(256)) +
+  theme(
+    axis.text.x = element_text(angle=90, hjust=1),
+    axis.line = element_blank(),
+    panel.grid.major = element_line(color='gray', size=0.25),
+    panel.border = element_rect(color='black', fill=NA, size=1)
+  ) -> g
+print(g)
+dev.off()
+
+# loop through enrichr files to make GO dot plots:
+
+for(i in 1:length(enrichr_files)){
+
+  # load enrichr go terms table
+  cur_file <- enrichr_files[i]
+  cur_terms <- read.csv(paste0(data_dir,cur_file)) %>% na.omit %>% subset(adj.Pval <= 0.05)
+  cur_celltype <- strsplit(cur_file, 'EnrichR') %>% unlist %>% .[1]
+  print(cur_celltype)
+
+  cur_terms$term <- factor(cur_terms$GO_Biological_Process_2018, levels=unique(cur_terms$GO_Biological_Process_2018))
+  cur_terms$wrap <- wrapText(cur_terms$term, 45)
+  cur_terms$wrap <- factor(cur_terms$wrap, levels=rev(unique(cur_terms$wrap)))
+
+  pdf(paste0(fig_dir, cur_celltype,'_GO_terms.pdf'), width=7, height=8, useDingbats=FALSE)
+  cur_terms %>%
+    ggplot(aes(Module, wrap)) +
+    geom_point(aes(col=-log(adj.Pval), size=Combined.Zscore)) +
+    scale_size(range=c(3,10)) +
+    scale_color_gradientn(colors=colfunc(256)) +
+    theme(
+      axis.text.x = element_text(angle=90, hjust=1),
+      axis.line = element_blank(),
+      panel.grid.major = element_line(color='gray', size=0.25),
+      panel.border = element_rect(color='black', fill=NA, size=1)
+    ) -> g
+  print(g)
+  dev.off()
+}
+
+```
+
+Compute module scores in each cell for all scWGCNA modules
+
+```{r eval=FALSE}
+
+
+# load scWGCNA modules #########################################################
+cur_celltype <- 'ODC'
+
+celltypes <- c('ASC', 'MG', 'EX', 'INH', 'ODC')
+
+for(cur_celltype in celltypes){
+  print(cur_celltype)
+  #dir.create(paste0(fig_dir, cur_celltype))
+  geneInfo <- read.csv(paste0(data_dir, 'geneInfoSigned_', cur_celltype, '.csv'), stringsAsFactors=FALSE)
+  geneInfo <- geneInfo %>% subset(GeneSymbol %in% VariableFeatures(NucSeq))
+
+  # get top 25 genes by kME for each module:
+  n_genes <- 25
+  module_labels <- unique(geneInfo$ModuleLabel)
+  modules <- unique(geneInfo$Initially.Assigned.Module.Color)
+  module_labels <- module_labels[order(modules)]
+  modules <- modules[order(modules)]
+  module_list <- lapply(modules, function(mod){
+    cur <- subset(geneInfo, Initially.Assigned.Module.Color == mod)
+    cur[,c('GeneSymbol', paste0('kME', mod))] %>%
+      top_n(n_genes) %>% .$GeneSymbol
+  })
+  names(module_list) <-module_labels
+
+  # compute module scores:
+  NucSeq <- AddModuleScore(
+   NucSeq,
+   features=module_list,
+   pool = rownames(NucSeq), k=F, nbin=24,
+   name=paste0(cur_celltype, '_module')
+  )
+
+}
+
+
+```
+
+
+Plot heatmap of module scores for each cluster:
+
+```{r eval=FALSE}
+library(reshape2)
+library(ComplexHeatmap)
+
+cur_celltype <- 'ODC'; w=8; h=3; module_prefix = 'OM';
+cur_celltype <- 'MG'; w=4; h=4; module_prefix = 'MM';
+cur_celltype <- 'ASC'; w=5; h=4; module_prefix = 'AM';
+cur_celltype <- 'EX'; w=5; h=4; module_prefix = 'EM';
+cur_celltype <- 'INH'; w=5; h=4; module_prefix = 'IM';
+
+
+# load geneInfo file
+geneInfo <- read.csv(paste0(data_dir, 'geneInfoSigned_', cur_celltype, '.csv'), stringsAsFactors=FALSE)
+geneInfo <- geneInfo %>% subset(GeneSymbol %in% VariableFeatures(NucSeq))
+
+# get module colors
+n_genes <- 25
+module_labels <- unique(geneInfo$ModuleLabel)
+modules <- unique(geneInfo$Initially.Assigned.Module.Color)
+module_labels <- module_labels[order(modules)]
+modules <- modules[order(modules)]
+mod_colors <- modules
+names(mod_colors) <- module_labels
+module_list <- lapply(modules, function(mod){
+  cur <- subset(geneInfo, Initially.Assigned.Module.Color == mod)
+  cur[,c('GeneSymbol', paste0('kME', mod))] %>%
+    top_n(n_genes) %>% .$GeneSymbol
+})
+names(module_list) <-module_labels
+
+
+# get module scores from snRNA data
+module_df <- subset(NucSeq@meta.data, Cell.Type == cur_celltype)
+features <- names(module_df)[grepl(cur_celltype, names(module_df))]
+feat2mod <- features; names(feat2mod) <- module_labels
+module_df <- module_df[,c('monocle_clusters_umap_ID', features)]
+#
+
+
+# compute average module score for each cluster:
+tmp <- lapply(unique(module_df$monocle_clusters_umap_ID), function(i){
+  cur_df <- module_df %>% subset(monocle_clusters_umap_ID == i)
+  data.frame(
+    value=as.numeric(colSums(cur_df[,features]) / nrow(cur_df)),
+    cluster = i,
+    feature = features
+  )
+})
+plot_df <- Reduce(rbind, tmp)
+plot_df$feature <- names(feat2mod[plot_df$feature])
+
+# remove gray module:
+plot_df <- subset(plot_df, feature != 'grey')
+mod_colors <- mod_colors[module_labels != 'grey']
+module_labels <- module_labels[module_labels != 'grey']
+names(mod_colors) <- module_labels
+
+# reshape to wide format
+plot_df <- reshape2::dcast(plot_df, feature ~ cluster)
+rownames(plot_df) <- plot_df$feature
+plot_df <- plot_df %>% select(-c(feature))
+
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(plot_df, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# re-order clusters for ODC cluster:
+# matrix_z <- matrix_z[,c('ODC13', 'ODC8', 'ODC12', 'ODC10', 'ODC5', 'ODC3', 'ODC7', 'ODC6', 'ODC11', 'ODC2', 'ODC9', 'ODC1', 'ODC4')]
+
+# keep full values to plot onto the heatmap
+matrix_full <- matrix_z
+matrix_anno <- ifelse(matrix_full >= quantile(matrix_full, 0.80), signif(matrix_full,2), '')
+
+# change the range
+range(matrix_z)
+matrix_z <- ifelse(matrix_z >= 2, 2, matrix_z)
+matrix_z <- ifelse(matrix_z <= -2, -2, matrix_z)
+
+# rename modules
+rownames(matrix_z) <- module_labels
+rownames(matrix_anno) <- module_labels
+matrix_anno <- matrix_anno[rownames(matrix_z)[order(rownames(matrix_z))],]
+matrix_z <- matrix_z[rownames(matrix_z)[order(rownames(matrix_z))],]
+
+
+# color the rows by scWGCNA module color, cols by single-cell clusters
+cluster_colors <- unlist(color_scheme_snRNA_clusters)[colnames(matrix_z)]
+column_ha <- HeatmapAnnotation(
+  Cluster = colnames(matrix_z),
+  col = list(
+    Cluster = cluster_colors
+  )
+)
+
+# names(mod_colors) <- rownames(matrix_z)
+row_ha <- rowAnnotation(
+  module = rownames(matrix_z),
+  col = list(
+    module = mod_colors
+  )
+)
+
+
+pdf(paste0(fig_dir, cur_celltype, '/', cur_celltype, '_module_heatmap.pdf'), width=w, height=h)
+ComplexHeatmap::Heatmap(
+  matrix_z,
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = column_ha,
+  left_annotation = row_ha,
+  use_raster = TRUE,
+  cell_fun = function(j,i,x,y,w,h,col){
+    grid.text(matrix_anno[i,j], x, y)
+  }
+)
+dev.off()
+
+```
+
+# Compute module scores and plot heatmaps for snATAC data
+```{r eval=FALSE}
+
+NucSeq.coembed <- readRDS('data/NucSeq_coembed_seurat.rds')
+NucSeq.atac <- subset(NucSeq.coembed, tech =='atac')
+NucSeq.atac <- NucSeq.atac[VariableFeatures(NucSeq),]
+
+# compute module scores #########################################################
+celltypes <- c('ASC', 'MG', 'EX', 'INH', 'ODC')
+
+for(cur_celltype in celltypes){
+  print(cur_celltype)
+  geneInfo <- read.csv(paste0(data_dir, 'geneInfoSigned_', cur_celltype, '.csv'), stringsAsFactors=FALSE)
+  geneInfo <- geneInfo %>% subset(GeneSymbol %in% VariableFeatures(NucSeq))
+
+  # get top 50 genes by kME for each module:
+  n_genes <- 50
+  module_labels <- unique(geneInfo$ModuleLabel)
+  modules <- unique(geneInfo$Initially.Assigned.Module.Color)
+  module_labels <- module_labels[order(modules)]
+  modules <- modules[order(modules)]
+  module_list <- lapply(modules, function(mod){
+    cur <- subset(geneInfo, Initially.Assigned.Module.Color == mod)
+    cur[,c('GeneSymbol', paste0('kME', mod))] %>%
+      top_n(n_genes) %>% .$GeneSymbol
+  })
+  names(module_list) <-module_labels
+
+  # compute module scores:
+  NucSeq.atac <- AddModuleScore(
+   NucSeq.atac,
+   features=module_list,
+   pool = rownames(NucSeq.atac), k=F, nbin=24,
+   name=paste0(cur_celltype, '_module')
+  )
+}
+
+# plot as heatmap
+cur_celltype <- 'ODC'; w=10; h=4; module_prefix = 'OM';
+cur_celltype <- 'MG'; w=5; h=4; module_prefix = 'MM';
+cur_celltype <- 'ASC'; w=6; h=4; module_prefix = 'AM';
+cur_celltype <- 'EX'; w=5; h=4; module_prefix = 'EM';
+cur_celltype <- 'INH'; w=5; h=4; module_prefix = 'IM';
+
+# load geneInfo file
+geneInfo <- read.csv(paste0(data_dir, 'geneInfoSigned_', cur_celltype, '.csv'), stringsAsFactors=FALSE)
+geneInfo <- geneInfo %>% subset(GeneSymbol %in% VariableFeatures(NucSeq))
+
+# get module colors
+n_genes <- 25
+module_labels <- unique(geneInfo$ModuleLabel)
+modules <- unique(geneInfo$Initially.Assigned.Module.Color)
+module_labels <- module_labels[order(modules)]
+modules <- modules[order(modules)]
+mod_colors <- modules
+names(mod_colors) <- module_labels
+module_list <- lapply(modules, function(mod){
+  cur <- subset(geneInfo, Initially.Assigned.Module.Color == mod)
+  cur[,c('GeneSymbol', paste0('kME', mod))] %>%
+    top_n(n_genes) %>% .$GeneSymbol
+})
+names(module_list) <-module_labels
+
+
+# get module scores from snRNA data
+module_df <- subset(NucSeq.atac@meta.data, Cell.Type == cur_celltype)
+features <- names(module_df)[grepl(cur_celltype, names(module_df))]
+feat2mod <- features; names(feat2mod) <- module_labels
+module_df <- module_df[,c('monocle_clusters_umap_ID', features)]
+#
+
+
+# compute average module score for each cluster:
+tmp <- lapply(unique(module_df$monocle_clusters_umap_ID), function(i){
+  cur_df <- module_df %>% subset(monocle_clusters_umap_ID == i)
+  data.frame(
+    value=as.numeric(colSums(cur_df[,features]) / nrow(cur_df)),
+    cluster = i,
+    feature = features
+  )
+})
+plot_df <- Reduce(rbind, tmp)
+plot_df$feature <- names(feat2mod[plot_df$feature])
+
+# remove gray module:
+plot_df <- subset(plot_df, feature != 'grey')
+mod_colors <- mod_colors[module_labels != 'grey']
+module_labels <- module_labels[module_labels != 'grey']
+names(mod_colors) <- module_labels
+
+# reshape to wide format
+plot_df <- reshape2::dcast(plot_df, feature ~ cluster)
+rownames(plot_df) <- plot_df$feature
+plot_df <- plot_df %>% select(-c(feature))
+
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(plot_df, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# re-order clusters for ODC cluster:
+# matrix_z <- matrix_z[,c('ODC.a', 'ODC.b', 'ODC.l', 'ODC.g', 'ODC.i', 'ODC.m', 'ODC.j', 'ODC.f', 'ODC.h', 'ODC.c', 'ODC.e', 'ODC.k', 'ODC.d')]
+
+# keep full values to plot onto the heatmap
+matrix_full <- matrix_z
+matrix_anno <- ifelse(matrix_full >= quantile(matrix_full, 0.80), signif(matrix_full,2), '')
+
+# change the range
+range(matrix_z)
+matrix_z <- ifelse(matrix_z >= 2, 2, matrix_z)
+matrix_z <- ifelse(matrix_z <= -2, -2, matrix_z)
+
+# rename modules
+rownames(matrix_z) <- module_labels
+rownames(matrix_anno) <- module_labels
+matrix_anno <- matrix_anno[rownames(matrix_z)[order(rownames(matrix_z))],]
+matrix_z <- matrix_z[rownames(matrix_z)[order(rownames(matrix_z))],]
+
+
+# color the rows by scWGCNA module color, cols by single-cell clusters
+cluster_colors <- color_scheme_snATAC_clusters_flat[colnames(matrix_z)]
+column_ha <- HeatmapAnnotation(
+  Cluster = colnames(matrix_z),
+  col = list(
+    Cluster = cluster_colors
+  )
+)
+
+# names(mod_colors) <- rownames(matrix_z)
+row_ha <- rowAnnotation(
+  module = rownames(matrix_z),
+  col = list(
+    module = mod_colors
+  )
+)
+
+colfunc.atac = colorRamp2(c(-2, 0, 2), c(brewer.pal(11, 'PRGn' )[10], "white", brewer.pal(11, 'PRGn' )[2]))
+
+pdf(paste0(fig_dir, cur_celltype, '/', cur_celltype, '_atac_module_heatmap.pdf'), width=w, height=h)
+ComplexHeatmap::Heatmap(
+  matrix_z,
+  col = colfunc.atac,
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  top_annotation = column_ha,
+  left_annotation = row_ha,
+  use_raster = TRUE,
+  cell_fun = function(j,i,x,y,w,h,col){
+    grid.text(matrix_anno[i,j], x, y)
+  }
+)
+dev.off()
+
+```
