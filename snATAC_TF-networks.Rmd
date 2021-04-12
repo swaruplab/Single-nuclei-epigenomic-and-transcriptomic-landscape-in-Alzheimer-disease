@@ -1,0 +1,486 @@
+
+
+# Load Required libraries and data:
+
+```{r eval=FALSE}
+#  conda activate cicero
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(ArchR)
+library(future.apply)
+library(ggpubr)
+library(reshape2)
+library(patchwork)
+library(RColorBrewer)
+library(Gviz)
+
+
+NucSeq.atac <- readRDS(file='data/NucSeq_macs2Peaks_signac.rds')
+NucSeq <- readRDS('data/NucSeq_batch_correct_seurat.rds')
+
+# load ArchR project
+proj <- loadArchRProject(path = "/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/ArchR3/all_samples/")
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), '-', start(proj@peakSet), '-', end(proj@peakSet))
+proj@peakSet$site_name2 <- paste0(as.character(seqnames(proj@peakSet)), ':', start(proj@peakSet), '-', end(proj@peakSet))
+
+################################################################################
+# Load ensembl db annotations
+################################################################################
+
+library(EnsDb.Hsapiens.v86)
+gene.coords <- genes(EnsDb.Hsapiens.v86, filter = ~ gene_biotype == "protein_coding")
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Extend(x = gene.coords, upstream = 2000, downstream = 0)
+genebodyandpromoter.coords <- genebodyandpromoter.coords %>% subset(seqnames %in% c(1:22,'Y','X'))
+
+################################################################################
+# Load gl-cCREs, DA motifs, DEGs
+################################################################################
+
+load('data/top_link_df.rda')
+top_link_df$Peak2 <- sub(':', '-', as.character(top_link_df$Peak2))
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+
+```
+
+Set motif assay for snATAC-seq data
+```{r eval=FALSE}
+
+library(JASPAR2018)
+library(TFBSTools)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+
+pfm <- getMatrixSet(
+  x = JASPAR2018,
+  opts = list(species = 9606, all_versions = FALSE)
+)
+
+NucSeq.atac <- AddMotifs(
+ object = NucSeq.atac,
+ genome = BSgenome.Hsapiens.UCSC.hg38,
+ pfm = pfm
+)
+
+```
+
+Load DA motifs and DEGs:
+
+```{r eval=FALSE}
+
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+
+load('data/diagnosis_da_motifs.rda')
+load('ata/da_motifs.rda')
+da_motifs_celltypes$motif_name <- as.character(motif_names[da_motifs_celltypes$gene])
+diagnosis_da_motifs$motif_name <- as.character(motif_names[diagnosis_da_motifs$gene])
+
+# load DEGs
+load("data/all_DEGs.rda")
+
+# load AD GWAS credible set list:
+load(file="data/gwas_snps_granges.rda")
+
+
+```
+
+Compute TF target scores
+
+```{r eval=FALSE}
+
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+
+################################################################################
+# select celltype
+################################################################################
+
+# for ODCs only
+cur_celltype <- c('ODC', 'OPC'); vln_width=12
+cur_seurat_atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% cur_celltype) # ODCs
+cur_seurat_rna <- subset(NucSeq, Cell.Type %in% cur_celltype) # ODCs
+
+# reset idents for ODCs:
+Idents(cur_seurat_atac) <- factor(
+  as.character(cur_seurat_atac$monocle_clusters_umap_ID),
+  levels=c('OPC.a', 'ODC.a', 'ODC.b', 'ODC.l', 'ODC.g', 'ODC.i', 'ODC.m', 'ODC.j', 'ODC.f', 'ODC.h', 'ODC.c', 'ODC.e', 'ODC.k', 'ODC.d')
+)
+Idents(cur_seurat_rna) <- factor(
+  as.character(cur_seurat_rna$monocle_clusters_umap_ID),
+  levels=c('OPC1', 'OPC2', 'ODC13', 'ODC8', 'ODC12', 'ODC10', 'ODC5', 'ODC3', 'ODC7', 'ODC6', 'ODC11', 'ODC2', 'ODC9', 'ODC1', 'ODC4')
+)
+
+# subset by celltype
+cur_celltype <- 'MG'; vln_width=6
+cur_celltype <- 'ASC'; vln_width=6
+cur_celltype <- 'EX'; vln_width=8
+
+# subset by celltype
+cur_seurat_atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+cur_seurat_rna <- subset(NucSeq, Cell.Type == cur_celltype)
+
+
+cur_seurat_atac <- FindTopFeatures(
+  cur_seurat_atac,
+  min.cutoff=ncol(cur_seurat_atac)*0.05 # present in what % of cells
+)
+cur_seurat_rna <- FindVariableFeatures(cur_seurat_rna)
+
+################################################################################
+# select TF / motif
+################################################################################
+
+# note: if there's more than 1 TF motif associated with that name (such as CTCF),
+# need to specify which motif ID.
+
+# use variable genes, or all genes?
+variable_genes_only <- FALSE
+
+# for emily Feb 2021:
+cur_motif <- 'NFIC'; cur_motif_ID <- 'MA0161.2'
+cur_motif <- 'STAT3'
+
+# MG:
+cur_motif <- 'SPI1'
+cur_motif <- 'ETS1'
+
+# ODC:
+cur_motif <- 'SOX9'
+cur_motif <- 'SOX13'
+cur_motif <- 'SREBF1'
+cur_motif <- 'SREBF2'; cur_motif_ID <- 'MA0828.1'
+cur_motif <- 'NRF1'
+
+# ASC:
+cur_motif <- 'CTCF'; cur_motif_ID <- 'MA0139.1'
+cur_motif <- 'FOSL2'; cur_motif_ID <- 'MA0478.1'
+cur_motif <- 'FOSL2_JUNB'; cur_motif_ID <- 'MA1138.1'
+cur_motif <- 'STAT3'
+cur_motif <- 'ISX'
+cur_motif <- 'SHOX'
+
+# EX:
+cur_motif <- 'REST'
+cur_motif <- 'JUN'; cur_motif_ID <- 'MA0489.1'
+cur_motif <- 'EGR1'
+
+cur_motif_ID <- names(motif_names[grepl(cur_motif, motif_names)])
+
+################################################################################
+# Find promoters & genes with accessible TF binding sites
+################################################################################
+
+# get all regions with cur_motif binding site:
+cur_motif_accessible <- Motifs(NucSeq.atac)@data[,cur_motif_ID]
+cur_motif_accessible <- names(cur_motif_accessible)[cur_motif_accessible > 0]
+
+# subset this list by top features
+cur_motif_accessible <- cur_motif_accessible[cur_motif_accessible %in% VariableFeatures(cur_seurat_atac)]
+
+# which of these peaks are at promoters?
+cur_motif_accessible_promoters <- cur_motif_accessible[cur_motif_accessible %in% proj@peakSet$site_name[proj@peakSet$peakType == 'Promoter']]
+
+# which genes are associated with these promoters?
+cur_motif_target_genes <- proj@peakSet$nearestGene[match(cur_motif_accessible_promoters, proj@peakSet$site_name)]
+
+# optional:
+# which of these genes are highly expressed in snRNA-seq?
+if(variable_genes_only){
+  cur_motif_target_genes <- cur_motif_target_genes[cur_motif_target_genes %in% VariableFeatures(NucSeq)] %>% as.character %>% unique %>% list
+}
+
+# remove genes that are not in the seurat obj
+cur_motif_target_genes <- as.character(cur_motif_target_genes)
+cur_motif_target_genes <- cur_motif_target_genes[cur_motif_target_genes %in% rownames(NucSeq)]
+
+################################################################################
+# Compute module score for these target genes
+################################################################################
+
+gene_list <- list(
+  cur_motif_target_genes
+)
+names(gene_list) <- paste0(cur_motif, '_targets')
+
+NucSeq <- AddModuleScore(
+ NucSeq,
+ features=gene_list,
+ pool = rownames(NucSeq), k=F, nbin=24,
+ name=paste0(cur_motif, '_targets')
+)
+
+
+################################################################################
+# plot module score feature plot:
+################################################################################
+
+# settings for featureplot
+order_values <- TRUE
+reduct <- 'umap'
+
+# plot promoter target gene module score for this TF:
+p <- FeaturePlot(NucSeq, features=paste0(cur_motif, '_targets1'), order=order_values, reduction=reduct, raster=800) +
+scale_color_gradient2(low=scales::muted('blue'), mid='white', high=scales::muted('red')) +
+theme(plot.margin = unit(c(0, 0, 0, 0), "in")) + umap_theme +
+ggtitle(paste0(cur_motif, ' target score'))
+pdf(paste0('figures/TF_targets/', cur_celltype, '_', cur_motif, '_targets.pdf'), width=5, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+# plot chromVAR deviation for this TF:
+order_values <- TRUE
+p <- FeaturePlot(NucSeq.atac, features=cur_motif_ID, order=order_values, reduction=reduct, raster=500) +
+  scale_color_gradient2(
+    low=rgb(32, 67, 37, maxColorValue=255), mid='white', high=rgb(58, 22, 72, maxColorValue=255)) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "in")) + umap_theme +
+    ggtitle(paste0(cur_motif, ' motif'))
+
+pdf(paste0('figures/TF_targets/', cur_celltype, '_', cur_motif,  '_deviation.pdf'), width=5, height=4, useDingbats=FALSE)
+p
+dev.off()
+
+################################################################################
+# cluster violin plot for target expression modules
+################################################################################
+
+plot_rna <- subset(NucSeq, Cell.Type == cur_celltype)
+Idents(plot_rna) <- factor(plot_rna$monocle_clusters_umap_ID, levels=unique(plot_rna$monocle_clusters_umap_ID)[order(unique(plot_rna$monocle_clusters_umap_ID))])
+plot_atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+Idents(plot_atac) <- factor(plot_atac$monocle_clusters_umap_ID, unique(plot_atac$monocle_clusters_umap_ID)[order(unique(plot_atac$monocle_clusters_umap_ID))])
+
+# ODC
+# Idents(plot_atac) <- factor(
+#   as.character(plot_atac$monocle_clusters_umap_ID),
+#   levels=c('OPC.a', 'ODC.a', 'ODC.b', 'ODC.l', 'ODC.g', 'ODC.i', 'ODC.m', 'ODC.j', 'ODC.f', 'ODC.h', 'ODC.c', 'ODC.e', 'ODC.k', 'ODC.d')
+# )
+# Idents(plot_rna) <- factor(
+#   as.character(plot_rna$monocle_clusters_umap_ID),
+#   levels=c('OPC1', 'OPC2', 'ODC13', 'ODC8', 'ODC12', 'ODC10', 'ODC5', 'ODC3', 'ODC7', 'ODC6', 'ODC11', 'ODC2', 'ODC9', 'ODC1', 'ODC4')
+# )
+#
+
+p1 <- VlnPlot(plot_rna, features=paste0(cur_motif, '_targets1'), split.by='Diagnosis', split.plot=TRUE, pt.size=0) +
+stat_compare_means(method='wilcox.test', label='p.signif', label.y=0.05) +
+geom_hline(yintercept = 0, linetype='dashed') +
+xlab('') + ylab(paste0(cur_motif, ' targets')) + ggtitle('') +
+theme(plot.margin = unit(c(0, 0, 0, 0.1), "in"), axis.title.y=element_text(face='bold')) +
+NoLegend()
+
+p2 <- VlnPlot(plot_rna, features=cur_motif, split.by='Diagnosis', split.plot=TRUE, pt.size=0) +
+stat_compare_means(method='wilcox.test', label='p.signif', label.y=3) +
+xlab('') + ylab(paste0(cur_motif, ' expression')) + ggtitle('') +
+theme(plot.margin = unit(c(0, 0, 0, 0.1), "in"), axis.title.y=element_text(face='bold')) +
+NoLegend()
+
+p3 <- VlnPlot(plot_atac, assay='chromvar', features=cur_motif_ID, split.by='Diagnosis', split.plot=TRUE, pt.size=0) +
+stat_compare_means(method='wilcox.test', label='p.signif', label.y=3)  +
+xlab('') + ylab(paste0(cur_motif, ' deviation')) + ggtitle('') +
+theme(plot.margin = unit(c(0, 0, 0, 0.1), "in"), axis.title.y=element_text(face='bold')) +
+NoLegend() + geom_hline(yintercept = 0, linetype='dashed')
+
+pdf(paste0('figures/TF_targets/', cur_celltype, '_', cur_motif,  '_targets_vln.pdf'), width=vln_width/2, height=3)
+p1
+p2
+p3
+dev.off()
+
+```
+
+motif logo plots:
+
+```{r eval=FALSE}
+
+motif_names[grepl('NFIC', motif_names)]
+motif_names[grepl('NFIA', motif_names)]
+
+
+pdf(paste0('figures/NFIC_motifs.pdf'), width=5, height=2, useDingbats=FALSE)
+MotifPlot(
+  object = NucSeq.atac,
+  motifs = c('MA0161.2', 'MA0670.1')
+)
+dev.off()
+
+```
+
+Construct TF nets
+
+```{r eval=FALSE}
+
+
+library(igraph)
+library(RColorBrewer)
+
+# select cell type and subset
+cur_celltype <- 'ASC';
+cur_celltype <- 'MG';
+
+use_variable_genes <- FALSE
+
+# subset seurat obj
+cur_seurat_atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% cur_celltype)
+cur_seurat_atac <- FindTopFeatures(
+  cur_seurat_atac,
+  min.cutoff=ncol(cur_seurat_atac)*0.05 # MG
+)
+
+
+# get links for this cell type
+cur_link_df <- subset(top_link_df, celltype %in% cur_celltype)
+cur_link_df$target_gene <- as.character(cur_link_df$Peak2_nearestGene)
+
+# use all JASPAR2018 motifs:
+motif_IDs <- names(motif_names)
+
+
+# select motifs
+motif_IDs <- c("MA0080.4", "MA0687.1", "MA0098.3", "MA0765.1", "MA0136.2") #MG
+motif_IDs <- c("MA0826.1", "MA0595.1", "MA0506.1", "MA0077.1", "MA1120.1", "MA0596.1") # ODC
+
+################################################################################
+# loop through motifs to get connections
+################################################################################
+
+# for each motif, find genes:
+motif_list <- list()
+edge_df <- data.frame()
+vertex_df <- data.frame()
+for(cur_motif_ID in motif_IDs){
+
+  # get cur motif name
+  cur_motif <- as.character(motif_names[cur_motif_ID])
+
+  # get list of promoter and enhancer targets of these TFs
+  cur_motif_accessible <- Motifs(NucSeq.atac)@data[,cur_motif_ID]
+  cur_motif_accessible <- names(cur_motif_accessible)[cur_motif_accessible > 0]
+  cur_motif_accessible_promoters <- cur_motif_accessible[cur_motif_accessible %in% proj@peakSet$site_name[proj@peakSet$peakType == 'Promoter']]
+  cur_motif_target_genes <- proj@peakSet$nearestGene[match(cur_motif_accessible_promoters, proj@peakSet$site_name)]
+
+  # variable genes only?
+  if(use_variable_genes){
+    cur_motif_target_genes <- cur_motif_target_genes[cur_motif_target_genes %in% VariableFeatures(NucSeq)] %>% as.character %>% unique
+  } else{cur_motif_target_genes<- cur_motif_target_genes %>% as.character %>% unique}
+
+  # enhancer target genes
+  cur_motif_accessible_enhancers <- cur_motif_accessible[cur_motif_accessible %in% cur_link_df$Peak2]
+  cur_motif_enhancers_target_genes <- subset(cur_link_df, Peak2 %in% cur_motif_accessible_enhancers) %>% .$target_gene
+
+  # variable genes only?
+  if(use_variable_genes){
+    cur_motif_enhancers_target_genes <- cur_motif_enhancers_target_genes[cur_motif_enhancers_target_genes %in% VariableFeatures(NucSeq)] %>% as.character %>% unique
+  } else{cur_motif_enhancers_target_genes<- cur_motif_enhancers_target_genes %>% as.character %>% unique}
+
+  cur_vertex_df <- data.frame(
+    name = c(cur_motif ,as.character(unique(c(unlist(cur_motif_enhancers_target_genes), unlist(cur_motif_target_genes)))))
+  )
+
+  # check if there are promoter targets:
+  if(length(cur_motif_target_genes) > 0){
+    cur_promoter_edge_df <- data.frame(
+      from=cur_motif,
+      to=as.character(unlist(cur_motif_target_genes)),
+      type='promoter'
+    )
+  } else{cur_promoter_edge_df <- data.frame()}
+
+  # check if there are enhancer targets:
+  if(length(cur_motif_enhancers_target_genes) > 0){
+    cur_enhancer_edge_df <- data.frame(
+      from=cur_motif,
+      to=as.character(unlist(cur_motif_enhancers_target_genes)),
+      type='enhancer'
+    )
+  } else{cur_enhancer_edge_df <- data.frame()}
+
+  #cur_edge_df <- rbind(cur_promoter_edge_df, cur_enhancer_edge_df, cur_repressors_edge_df)
+  cur_edge_df <- rbind(cur_promoter_edge_df, cur_enhancer_edge_df)
+
+  edge_df <- rbind(edge_df, cur_edge_df)
+  vertex_df <- rbind(vertex_df, cur_vertex_df)
+
+}
+
+vertex_df <- data.frame(name=na.omit(as.character(unique(vertex_df$name))))
+vertex_df$name <- as.character(vertex_df$name)
+
+edge_df <- na.omit(edge_df)
+
+################################################################################
+# visual settings for network
+################################################################################
+
+# color vertices based on Diagnosis DEGs:
+up_in_AD <- celltype.diagnosis.markers %>% subset(cluster == 'AD' & celltype == cur_celltype & avg_logFC >=0) %>% .$gene
+down_in_AD <- celltype.diagnosis.markers %>% subset(cluster == 'AD' & celltype == cur_celltype & avg_logFC < 0) %>% .$gene
+
+# remove labels if gene is not DE, or not a TF:
+de_targets <- as.character(vertex_df$name[vertex_df$name %in% unique(c(up_in_AD, down_in_AD))])
+vertex_df$label <- ifelse(vertex_df$name %in% de_targets, vertex_df$name, '')
+vertex_df$label <- ifelse(vertex_df$name %in% as.character(motif_names), vertex_df$name, vertex_df$label)
+vertex_df$label <- ifelse(vertex_df$name %in% gwas_genes, vertex_df$name, vertex_df$label)
+
+# set node color based on control vs AD DEGs:
+vertex_df$color <- ifelse(vertex_df$name %in% as.character(motif_names), 'dodgerblue', rgb(1, 1,1 , 0.5))
+vertex_df$color <- ifelse(vertex_df$name %in% up_in_AD, "#E87D72",  rgb(1, 1,1 , 0.5))
+vertex_df$color <- ifelse(vertex_df$name %in% down_in_AD, '#55BCC2', vertex_df$color)
+vertex_df$color <- ifelse(vertex_df$name %in% as.character(motif_names), 'dodgerblue',vertex_df$color)
+vertex_df$color <- ifelse(vertex_df$name %in% gwas_genes, 'orange', vertex_df$color)
+
+# italics font for genes:
+vertex_df$font <- ifelse(vertex_df$name %in% as.character(motif_names), 2, 4)
+
+# set size to larger if the gene is a TF:
+ertex_df$size <- ifelse(vertex_df$name %in% as.character(motif_names), 10, 2)
+
+other_tfs <- as.character(motif_names)[as.character(motif_names) %ni% as.character(unlist(motif_names[motif_IDs]))]
+
+vertex_df$size <- ifelse((vertex_df$name %in% de_targets | vertex_df$name %in% gwas_genes | vertex_df$name %in% other_tfs), 5, 2)
+vertex_df$size <- ifelse(vertex_df$name %in% as.character(unlist(motif_names[motif_IDs])), 10, vertex_df$size)
+
+################################################################################
+# graph all nodes
+################################################################################
+
+enhancer_color <- 'seagreen3'
+promoter_color <- 'plum1'
+
+enhancer_color <- 'goldenrod1'
+promoter_color <- 'darkturquoise'
+
+# repressor_color <- 'gray'
+
+g <- igraph::graph_from_data_frame(edge_df, directed=TRUE, vertices=vertex_df)
+l <- layout_with_fr(g)
+
+edge_colors <- ifelse(E(g)$type == 'promoter', promoter_color, enhancer_color)
+# edge_colors <- ifelse(E(g)$type == 'repressor', repressor_color, edge_colors)
+
+pdf(paste0('figures/', cur_celltype, '_TF_interaction_graph.pdf'), width=10, height=10, useDingbats=FALSE)
+plot(
+  g, layout=l,
+  vertex.size=vertex_df$size,
+  edge.color=edge_colors,
+  edge.alpha=0.5,
+  vertex.color=vertex_df$color,
+  vertex.label=vertex_df$label, vertex.label.family='Helvetica', vertex.label.font=vertex_df$font,
+  vertex.label.color = 'black',
+  edge.arrow.size=0.25
+)
+dev.off()
+
+```
