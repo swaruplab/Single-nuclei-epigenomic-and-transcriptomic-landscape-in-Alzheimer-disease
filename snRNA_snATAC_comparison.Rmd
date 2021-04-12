@@ -1,0 +1,144 @@
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(ArchR)
+library(future.apply)
+library(reshape2)
+library(patchwork)
+library(ggpubr)
+library(RColorBrewer)
+options(stringsAsFactors=FALSE)
+
+# load data:
+NucSeq.atac.cortex <- readRDS(file='data/NucSeq_processed_activity_qc_batch_correct.rds')
+DefaultAssay(NucSeq.atac.cortex) <- 'RNA'
+
+proj <- loadArchRProject(path = "ArchR/all_samples/")
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), '-', start(proj@peakSet), '-', end(proj@peakSet))
+
+# load snRNA-seq data:
+NucSeq <- readRDS('data/NucSeq_batch_correct_seurat.rds')
+
+```
+
+Correlate gene activity with gene expression in each major cell Type
+
+```{r eval=FALSE}
+
+celltypes <- c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC', 'PER.END')
+
+exp_mat <- GetAssayData(NucSeq, slot='data')
+acc_mat <- GetAssayData(NucSeq.atac.cortex, slot='data', assay='RNA')
+
+# subset by genes that are shared:
+genes.use <- intersect(rownames(acc_mat), rownames(exp_mat))
+exp_mat <- exp_mat[genes.use,]
+acc_mat <- acc_mat[genes.use,]
+all.equal(rownames(exp_mat), rownames(acc_mat))
+
+df <- data.frame()
+for(cur_celltype in celltypes){
+  cur_exp_mat <- exp_mat[,NucSeq$Cell.Type == cur_celltype]
+  cur_acc_mat <- acc_mat[,NucSeq.atac.cortex$monocle_clusters_umap_Cell.Type == cur_celltype]
+
+  # get DEGs for annotation purposes
+  cur_degs <- celltype.markers %>% subset(cluster == cur_celltype & gene %in% genes.use) %>% top_n(5, wt=avg_logFC) %>% .$gene
+
+  plot_df <- data.frame(
+    atac = rowSums(cur_acc_mat) / ncol(cur_acc_mat),
+    rna = rowSums(cur_exp_mat) / ncol(cur_exp_mat),
+    gene_name = rownames(exp_mat),
+    group = cur_celltype
+  )
+
+  plot_df$anno <- ifelse(plot_df$gene %in% cur_degs, plot_df$gene, NA)
+
+  df <- rbind(df, plot_df)
+}
+
+save(df, file='data/average_expression_and_activity.rda')
+
+```
+
+Run this part locally on my laptop because that's the only place I can install
+Cairo and ggrastr
+```{r eval=FALSE}
+# conda activate r-env
+library(tidyverse)
+library(ggrastr)
+library(ggpubr)
+
+load('average_expression_and_activity.rda')
+load('color_scheme.rda')
+
+
+# correlate
+p <- ggscatter(
+  df, x='rna', y='atac', color='group', #facet.by='group',
+  #label='anno',label.rectangle=TRUE, repel=TRUE,
+  add = "reg.line",  # Add regressin line
+ add.params = list(color = "black", fill = "lightgray"), # Customize reg. line
+ conf.int = TRUE, # Add confidence interval
+ cor.coef = TRUE, # Add correlation coefficient. see ?stat_cor
+ cor.coeff.args = list(method = "pearson", label.x = 3, label.sep = "\n")
+)+ scale_color_manual(values=unlist(color_scheme_snATAC_celltype)[1:7])
+
+p <- ggplot(df, aes(x=rna, y=atac, color=group)) +
+  rasterise(geom_point(), dpi = 400) +
+  geom_smooth(method = 'lm', color='black') +
+  stat_cor(p.accuracy = 0.00001, r.accuracy = 0.01, color='black', label.y = 0.9, label.x=0) +
+  scale_color_manual(values=unlist(color_scheme_snATAC_celltype)[1:7]) +
+  ylab('Average Gene Activity (snATAC-seq)') + xlab('Average Gene Expression (snRNA-seq)') + labs_pubr()
+
+
+pdf('correlate_exp_acc.pdf', width=12, height=6)
+p + facet_wrap(~group, ncol=4)  + theme_pubr()
+dev.off()
+
+
+```
+
+
+```{r eval=FALSE}
+
+library(GeneOverlap)
+
+plot_list <- list()
+for(cur_celltype in celltypes){
+
+  cur_df <- df %>% subset(group == cur_celltype)
+
+  cur_genes_atac <- cur_df %>% subset(atac >= quantile(cur_df$atac,0.80)) %>% .$gene
+  cur_genes_rna <- cur_df %>% subset(rna <= quantile(cur_df$rna,0.20)) %>% .$gene
+  cur_df$overlap <- ifelse(cur_df$gene_name %in% intersect(cur_genes_rna, cur_genes_atac), "Yes", "No")
+
+  data <- as.data.frame(table(cur_df$overlap))
+  colnames(data) <- c('category', 'count')
+  data$fraction <- data$count / sum(data$count)
+  data$ymax <- cumsum(data$fraction)
+  data$ymin <- c(0, head(data$ymax, n=-1))
+  data$labelPosition <- (data$ymax + data$ymin) / 2
+  data$label <- paste0(signif(data$count / sum(data$count) *100, 3), '%')
+
+  # Make the plot
+  plot_list[[cur_celltype]] <- ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=category)) +
+    geom_rect() +
+    geom_text( x=2, aes(y=labelPosition, label=label, color=category), size=5) + # x here controls label position (inner / outer)
+    scale_fill_manual(values=c(unlist(color_scheme_snATAC_celltype[cur_celltype]), 'gray')) +
+    scale_color_manual(values=c(unlist(color_scheme_snATAC_celltype[cur_celltype]), 'gray')) +
+    coord_polar(theta="y") +
+    xlim(c(0, 4)) +
+    theme_void() + NoLegend()
+
+}
+
+pdf('figures/donut.pdf', width=10, height=6)
+wrap_plots(plot_list, ncol=4)
+dev.off()
+
+
+
+```
