@@ -1,0 +1,490 @@
+
+
+
+## Plot co-accessibility of key GWAS loci
+
+```{r eval=FALSE}
+
+fig_dir <- "coaccessibility/"
+dir.create(fig_dir)
+
+gtf_file = '/dfs3/swaruplab/smorabit/resources/gencode.v29.annotation.gtf'
+gene_anno <- rtracklayer::readGFF(gtf_file)
+
+# rename some columns to match requirements
+gene_anno$chromosome <- gene_anno$seqid
+gene_anno$gene <- gene_anno$gene_id
+gene_anno$transcript <- gene_anno$transcript_id
+gene_anno$symbol <- gene_anno$gene_name
+
+grtrack <- GeneRegionTrack(
+  gene.coords, genome = 'hg38', chromosome = cur_chr,
+  name = "Gene Model",
+  transcriptAnnotation = "symbol",
+  background.title = "brown", fill = 'lightgray'
+)
+
+# select cell type and load cicero data
+cur_celltype <- 'ASC'
+
+load(paste0('data/',cur_celltype,'_CCANs.rda'))
+
+
+```
+
+Plot co-accessibility
+```{r eval=FALSE}
+
+# Microglia:
+cur_gene <- 'BIN1'; coaccess_ymax = 0.40; coaccess_thresh=0.075; lead=TRUE;
+cur_gene <- 'APOE'; coaccess_ymax = 0.30; coaccess_thresh=0.1; lead=FALSE;
+
+# Astrocytes:
+cur_gene <- 'APOE'; coaccess_ymax = 0.50; coaccess_thresh=0.15; lead=FALSE;
+cur_gene <- 'SLC24A4'; coaccess_ymax = 0.45; coaccess_thresh=0.15; lead=FALSE;
+
+# Oligodendrocyte:
+cur_gene <- 'BIN1'; coaccess_ymax = 0.35; coaccess_thresh=0.05; lead=TRUE
+cur_gene <- 'ADAM10'; coaccess_ymax = 0.25; coaccess_thresh=0.05; lead=TRUE
+
+# get gene region
+gene_region <- subset(genebodyandpromoter.coords, symbol ==cur_gene)[1]
+cur_chr <- seqnames(gene_region) %>% as.character
+cur_start <- start(gene_region) - 500000
+cur_end <- end(gene_region) + 500000
+
+view=paste0('chr',as.character(seqnames(gene_region)), '_', start(gene_region), '_', end(gene_region))
+
+# get GRanges for cur gene (AD)
+cur_ranges_AD <- connections_AD_ranges[connections_AD_ranges %over% gene_region]
+cur_ranges_AD_peak2 <- subset(connections_AD_peak2_ranges, Peak2 %in% cur_ranges_AD$Peak2 & Peak1 %in% cur_ranges_control$Peak1& coaccess >= coaccess_thresh)
+
+# get GRanges for cur gene (Control)
+cur_ranges_control <- connections_control_ranges[connections_control_ranges %over% gene_region]
+cur_ranges_control_peak2 <- subset(connections_control_peak2_ranges, Peak2 %in% cur_ranges_control$Peak2 & Peak1 %in% cur_ranges_control$Peak1 & coaccess >= coaccess_thresh)
+
+
+# plot connections in AD cells
+cur_conns_AD <- data.frame('Peak1'=cur_ranges_AD$Peak1, 'Peak2'=cur_ranges_AD$Peak2, 'coaccess'=cur_ranges_AD$coaccess)
+p_AD <- plot_connections(cur_conns_AD, paste0('chr',cur_chr), cur_start, cur_end,
+                 gene_model = gene_anno,
+                 alpha_by_coaccess=TRUE,
+                 connection_color="#E87D72",
+                 coaccess_cutoff = coaccess_thresh,
+                 connection_width = 1,
+                 collapseTranscripts = "longest",
+                 connection_ymax=coaccess_ymax,
+                 viewpoint=view,
+                 return_as_list=TRUE
+
+)
+
+# plot connections in control cells
+cur_conns_control <- data.frame('Peak1'=cur_ranges_control$Peak1, 'Peak2'=cur_ranges_control$Peak2, 'coaccess'=cur_ranges_control$coaccess)
+p_control <- plot_connections(cur_conns_control, paste0('chr',cur_chr), cur_start, cur_end,
+                 gene_model = gene_anno,
+                 alpha_by_coaccess=TRUE,
+                 connection_color="#55BCC2",
+                 coaccess_cutoff = coaccess_thresh,
+                 connection_width = 1,
+                 collapseTranscripts = "longest",
+                 connection_ymax=coaccess_ymax,
+                 viewpoint=view,
+                 return_as_list=TRUE
+
+)
+
+# select GWAS track
+if(cur_gene == 'APOE'){
+  cur_gwas_track = apoe_gwas_track
+} else if(lead){
+  cur_gwas_track = gwas_track_leadSNPs
+} else if(!lead){
+  cur_gwas_track = gwas_track
+}
+
+# flanking with GWAS SNPs?
+cur_gwas_snps <- subset(gwas_snp_regions, Locus==cur_gene)
+cur_ranges_AD[cur_ranges_AD %over% cur_gwas_snps]
+cur_ranges_control[cur_ranges_control %over% cur_gwas_snps]
+
+
+# plot cicero connections only, no peaks!
+pdf(paste0(fig_dir,cur_celltype,"_",cur_gene,"_diagnosis.pdf"), width=w, height=h)
+print(Gviz::plotTracks(
+   trackList=list(p_AD@trackList[[1]], p_control@trackList[[1]], grtrack, p_AD@trackList[[3]]),
+   sizes = c(4,4,2,1),
+   from = cur_start, to = cur_end, chromosome = cur_chr,
+   transcriptAnnotation = "symbol",
+   col.axis = "black",
+   fontsize.group = 6,
+   fontcolor.legend = "black",
+   lwd=.3,
+   title.width = .5,
+   background.title = "transparent",
+   col.border.title = "transparent"
+))
+dev.off()
+
+
+```
+
+
+
+Plot atac coverage for GWAS loci
+```{r eval=FALSE}
+
+load(file='data/AD_jansen_liftover_granges.rda')
+load('data/AD_jansen_liftover_granges.rda')
+
+library(Gviz)
+library(ggrepel)
+library(EnsDb.Hsapiens.v86)
+library(cowplot)
+library(viridis)
+theme_set(theme_cowplot())
+gene.coords <- genes(EnsDb.Hsapiens.v86, filter = ~ gene_biotype == "protein_coding")
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Signac::Extend(x = gene.coords, upstream = 2000, downstream = 0)
+genebodyandpromoter.coords <- genebodyandpromoter.coords %>% subset(seqnames %in% c(1:22,'Y','X'))
+
+
+
+# subset cell type of interest:
+cur_celltype <- 'ODC'
+
+cur_seurat <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+
+
+# get plotting coordinates for a certain gene:
+
+cur_gene <- 'ADAM10'; br = c(58250000, 58500000, 58750000, 59000000, 59250000)
+cur_gene <- 'APOE'; br = c(44400000, 44600000, 44800000, 45000000, 45200000, 45400000)
+cur_gene <- 'BIN1'; br = c(126500000, 126600000, 126750000, 126800000,  127000000, 127200000, 127250000, 127400000, 127500000)
+cur_gene <- 'SLC24A4'; br = c(91800000, 92100000, 92400000, 92700000, 93000000)
+
+
+
+gene_region <- subset(genebodyandpromoter.coords, symbol ==cur_gene)[1]
+cur_chr <- seqnames(gene_region) %>% as.character
+cur_start <- start(gene_region) - 500000
+cur_end <- end(gene_region) + 500000
+
+
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0('figures/coveragePlot/', cur_celltype, '_', cur_gene, '.pdf'), width=10, height=3)
+Signac::CoveragePlot(
+  cur_seurat,
+  region=cur_gene,
+  group.by='Diagnosis',
+  extend.upstream=500000,
+  extend.downstream=500000,
+  peaks=FALSE
+)
+dev.off()
+
+
+
+
+# manhattan plot in the same region:
+
+cur_ranges <- gwas_granges[gwas_granges %over% Extend(gene_region, 500000, 500000)]
+cur_ranges$CHR <- cur_ranges$chromosome
+
+cur_df <- data.frame(
+  CHR = cur_ranges$CHR,
+  BP = cur_ranges$bp,
+  P = cur_ranges$PVAL,
+  SNP=cur_ranges$rsID,
+  stringsAsFactors=FALSE
+)
+cur_df$logp <- -1*log10(cur_df$P)
+
+cur_df$causal <- ifelse(cur_df$SNP %in% credible_causal, 'yes', 'no')
+cur_df$lead <- ifelse(cur_df$SNP %in% lead_snp, 'lead', cur_df$causal)
+cur_df$anno <- ifelse(cur_df$lead == 'lead', cur_df$SNP, '')
+cur_df$size <- ifelse(cur_df$causal == 'yes', 2, 1)
+
+p <- ggplot(cur_df, aes(x=BP/1000, y=-log(P), color=-log(P), shape=lead)) +
+  geom_point(size=cur_df$size) +
+  scale_shape_manual(values=c(18, 19, 17)) +
+  geom_text_repel(
+    aes(label=anno), color='black') +
+  scale_color_gradientn(colors=rev(magma(100)[20:100])) +
+  #xlim(cur_start/1000, cur_end/1000) +
+  scale_x_continuous(n.breaks=10, limits=c(cur_start/1000, cur_end/1000)) +
+  # scale_x_continuous(cur_breaks/1000, n.breaks=length(cur_breaks)) +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+  )
+
+
+pdf(paste0('figures/', cur_gene, '_manhattan.pdf'), useDingbats=FALSE, width=10, height=2)
+p
+dev.off()
+
+
+
+# plot ideogram:
+
+cur_pos <- subset(genebodyandpromoter.coords, symbol==cur_gene)
+cur_position <- paste0('chr', as.character(seqnames(cur_pos)), ':',cur_start,'-',cur_end) # promoter only
+chr <- as.character(seqnames(cur_pos))
+gen <- 'hg38'
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+print(paste(cur_gene, 'chr:', as.character(seqnames(cur_pos)), ',', abs(start(cur_pos) - end(cur_pos)) + 2000))
+
+pdf(paste0('figures/', cur_gene, '_ideogram.pdf'), width=8, height=2)
+plotTracks(list(itrack), from=cur_start, to=cur_end, showId=FALSE)
+dev.off()
+
+
+
+
+lead_snp <- c(
+  'rs442495', # ADAM10
+  'rs4663105', # BIN1
+  'rs12590654', # SLC24A4
+  'rs41289512' # APOE
+)
+
+
+lead_snp %in% cur_df$SNP
+
+jansen_credible[,jansen_credible$SNP == lead_snp]
+
+jansen_credible <- read.csv('~/AD_NucSeq_2019/atac_analysis/all_data/data/jansen_credible.csv', stringsAsFactors=FALSE)
+credible_causal <-  subset(jansen_credible, Credible.Causal == 'Yes') %>% .$SNP
+
+
+
+```
+
+
+Combine causalDB datasets on zeus:
+```{r eval=FALSE}
+
+library(readxl)
+library(tidyverse)
+
+
+excel_files <- paste0('data/jansen_causalDB/', dir('data/jansen_causalDB/'))
+
+# load all files and format for liftover
+gwas_df <- Reduce(rbind, lapply(excel_files, function(x){read_excel(x)}))
+gwas_df$chr <- paste0('chr', gwas_df$CHR)
+gwas_df$end <- as.integer(gwas_df$POS + 1)
+gwas_df$start <- as.integer(gwas_df$POS)
+gwas_df_hg19 <- select(gwas_df, c(chr, start, end, rsID))
+write.table(gwas_df_hg19, file='data/jansen_causalDB_hg19.bed', sep='\t', col.names=F, row.names=F, quote=F)
+
+# load liftover data:
+gwas_df_hg38 <- read.table(file='data/jansen_causalDB_hg38_liftover.bed', sep='\t', stringsAsFactors=FALSE)
+names(gwas_df_hg38) <- c('chr', 'start', 'end', 'rsID')
+
+# transfer coordinates and save file
+gwas_df <- subset(gwas_df, rsID %in% gwas_df_hg38$rsID)
+all.equal(gwas_df$rsID, gwas_df_hg38$rsID)
+gwas_df$start <- gwas_df_hg38$start
+gwas_df$end <- gwas_df_hg38$end
+
+# format for gchromvar
+gwas_gchromvar <- select(gwas_df, c(chr, start, end, rsID, PAINTOR, CAVIARBF, FINEMAP))
+write.table(gwas_gchromvar, file='data/AD_Jansen_gchromvar.bed', sep='\t', col.names=F, row.names=F, quote=F)
+
+gwas_gchromvar <- dplyr::select(gwas_df, c(chr, start, end, rsID, PAINTOR, CAVIARBF, FINEMAP))
+write.table(gwas_gchromvar, file='data/AD_Jansen_gchromvar.bed', sep='\t', col.names=F, row.names=F, quote=F)
+
+
+# create GRanges object
+gwas_granges <- GRanges(
+  seqnames = gwas_df$CHR,
+  IRanges(
+    gwas_df$start,
+    gwas_df$end
+  )
+)
+gwas_granges$chromosome <- gwas_df$CHR
+gwas_granges$bp <- gwas_df$start
+gwas_granges$CAVIARBF <- gwas_df$CAVIARBF
+gwas_granges$PVAL <- gwas_df$PVAL
+gwas_granges$rsID <- gwas_df$rsID
+gwas_granges <- subset(gwas_granges, CAVIARBF >= 0)
+save(gwas_granges, file='data/AD_jansen_liftover_granges.rda')
+
+
+
+library(Signac)
+library(Seurat)
+library(gchromVAR)
+library(chromVAR)
+library(SummarizedExperiment)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(GenomicRanges)
+library(ArchR)
+library(Hmisc)
+library(ggpubr)
+
+proj <- loadArchRProject(path = "ArchR/all_samples/")
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), '-', start(proj@peakSet), '-', end(proj@peakSet))
+proj@peakSet$site_name2 <- paste0(as.character(seqnames(proj@peakSet)), ':', start(proj@peakSet), '-', end(proj@peakSet))
+
+
+# load atac-seq data and transfer co-embedding coordih
+NucSeq.atac <- readRDS('data/NucSeq_macs2Peaks_signac.rds')
+
+fragments <- Signac::Fragments(NucSeq.atac)[[1]]
+fragments <- UpdatePath(fragments, "data/fragments.tsv.gz")
+
+Fragments(NucSeq.atac) <- NULL
+Fragments(NucSeq.atac) <- fragments
+
+
+# using Distal peaks and counts: ######################################################
+peak_names <- rownames(NucSeq.atac)[proj@peakSet$peakType == 'Distal']
+data_matrix <- 'counts'
+fig_name <- 'jansen_credible_distalPeaks_counts'
+
+# using Proximal peaks and counts: ######################################################
+peak_names <- rownames(NucSeq.atac)[proj@peakSet$peakType != 'Distal']
+data_matrix <- 'counts'
+fig_name <- 'jansen_credible_proximalPeaks_counts'
+
+# Get accessibility matrix and genomic ranges
+peak_ranges <- Signac::StringToGRanges(peak_names, sep = c("-", "-"))
+counts <- GetAssayData(NucSeq.atac, assay='peaks', slot=data_matrix)[peak_names,]
+
+
+# set up Summarized Experiment object
+SE <- SummarizedExperiment(
+  assays = list(counts = counts),
+  rowData = peak_ranges,
+  colData = DataFrame(names = colnames(counts))
+)
+SE <- addGCBias(SE, genome = BSgenome.Hsapiens.UCSC.hg38)
+
+
+# compute weighted deviation:
+files <- 'data/AD_Jansen_gchromvar.bed'
+
+# import bedfiles
+gwas_SE <- importBedScore(
+  rowRanges(SE),
+  files,
+  colidx = 6 # 5 = PAINTOR, 6 = CAVIARBF, 7 = FINEMAP
+)
+
+# compute deviation scores
+wDEV <- computeWeightedDeviations(SE, gwas_SE)
+
+NucSeq.atac@meta.data$AD_gchromVAR_z <- as.numeric(t(assays(wDEV)$z))
+NucSeq.atac@meta.data$AD_gchromVAR_deviation <- as.numeric(t(assays(wDEV)$deviation))
+
+
+NucSeq.coembed <- readRDS('~/AD_NucSeq_2019/processed_seurat/NucSeq_coembed_seurat.rds')
+NucSeq.coembed <- subset(NucSeq.coembed, monocle_clusters_umap_ID != 'Unknown.a')
+coembed_cellnames <- sub('.', '', colnames(NucSeq.coembed))
+NucSeq.atac <- RenameCells(NucSeq.atac, add.cell.id='atac')
+
+
+NucSeq.atac.coembed <- NucSeq.atac[,colnames(NucSeq.atac) %in% coembed_cellnames]
+
+
+coembed_atac_umap <- NucSeq.coembed@reductions$umap@cell.embeddings[NucSeq.coembed$tech == 'atac',]
+rownames(coembed_atac_umap) <- sub('.', '', rownames(coembed_atac_umap))
+
+
+NucSeq.atac.coembed@reductions$coembedUMAP <- CreateDimReducObject(
+  embeddings = coembed_atac_umap,
+  key='umap',
+  assay='peaks'
+)
+
+
+```
+
+Run liftOver
+
+```{bash eval=FALSE}
+
+liftOver \
+  data/jansen_causalDB_hg19.bed \
+  hg19ToHg38.over.chain \
+  data/jansen_causalDB_hg38_liftover.bed \
+  data/unlifted.bed
+
+```
+
+Pseudotime trajectory for g-chromvar
+
+```{r eval=FALSE}
+
+cur_celltype <- 'MG'
+cur_coembed <- readRDS(paste0( cur_celltype, '_coembed_pseudotime_seurat.rds'))
+coembed_atac_barcodes <- paste0('atac_', do.call(rbind, strsplit(rownames(subset(cur_coembed@meta.data, tech=='atac')), '_'))[,3])
+
+cur_atac <- NucSeq.atac[,coembed_atac_barcodes]
+cur_coembed <- cur_coembed[, colnames(cur_coembed) %in% paste0('_',colnames(cur_atac))]
+cur_atac$pseudotime <- subset(cur_coembed@meta.data, tech=='atac') %>% .$pseudotime
+
+cur_coembed_umap <- cur_coembed@reductions$umap@cell.embeddings
+rownames(cur_coembed_umap) <- sub('.', '', rownames(cur_coembed_umap))
+
+cur_atac@reductions$coembedUMAP <- CreateDimReducObject(
+  embeddings = cur_coembed_umap,
+  key='umap',
+  assay='peaks'
+)
+
+# take 50 pseudotime bins
+n_bins = 50
+cur_atac$pseudotime_bin <- cut2(as.numeric(cur_atac$pseudotime), g=n_bins)
+Idents(cur_atac) <- cur_atac$pseudotime_bin
+
+
+# plot g-chromvar in 50 pseudotime bins:
+modules <- dplyr::select(cur_atac@meta.data, c(pseudotime_bin, AD_gchromVAR_z, AD_gchromVAR_deviation))
+modules$pseudotime_bin_num <- as.numeric(modules$pseudotime_bin)
+features <- c('AD_gchromVAR_z', 'AD_gchromVAR_deviation')
+mod_colors <- c('turquoise3', 'steelblue')
+
+
+# compute average expression of DAM modules in each pseudotime bin
+tmp <- lapply(1:max(modules$pseudotime_bin_num), function(i){
+  cur_df <- modules %>% subset(pseudotime_bin_num == i)
+
+  data.frame(
+    value=as.numeric(colSums(cur_df[,features]) / nrow(cur_df)),
+    bin_num = i,
+    feature = features
+  )
+})
+plot_df <- Reduce(rbind, tmp)
+head(plot_df)
+
+ plot_df <- subset(plot_df, feature=='AD_gchromVAR_deviation')
+
+p <- ggscatter(
+    plot_df,
+    x='bin_num', y='value',
+    add='reg.line',
+    add.params=list(color='black', fill='lightgray'),
+    conf.int=TRUE,
+    cor.coef=TRUE,
+    cor.coeff.args=list(method='pearson', label.sep='\n'),
+    alpha=0.5
+  ) + xlab('pseudotime') +
+  theme(
+    axis.ticks.x=element_blank(),
+    axis.text.x=element_blank()
+  )
+
+pdf(paste0('figures/', cur_celltype, '_gchromvar_trajectory_linear.pdf'), width=5, height=2, useDingbats=FALSE)
+print(p)
+dev.off()
+
+
+
+```
