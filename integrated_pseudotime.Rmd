@@ -1,0 +1,76 @@
+
+# Multi-omic pseudotime
+
+```{r eval=FALSE}
+
+# load coembedding data:
+NucSeq.coembed <- readRDS('data/NucSeq_coembed_seurat.rds')
+NucSeq_cds <- readRDS('data/NucSeq_coembed_cds.rds')
+
+cur_celltype <- 'MG'
+
+# subset by cell type:
+cur_coembed <- NucSeq.coembed %>% subset(Cell.Type == cur_celltype)
+cur_cds <- NucSeq_cds[,colnames(cur_coembed)]
+
+cur_cds <- reduce_dimension(cur_cds, reduction_method = 'UMAP', preprocess_method = "Aligned")
+
+# visualize
+pdf(paste0('figures/',cur_celltype,'/',cur_celltype,'_monocle_coembedding.pdf'), width=7, height=7)
+plot_cells(
+  cur_cds,
+  color_cells_by = "tech",
+  label_cell_groups=FALSE,
+  label_leaves=FALSE,
+  label_branch_points=FALSE,
+  graph_label_size=1.5
+)
+dev.off()
+
+# move umap from cds to seurat
+monocle_umap <- cur_cds@reducedDims[["UMAP"]]
+colnames(monocle_umap) <- c('UMAP_1', 'UMAP_2')
+all.equal(rownames(monocle_umap), colnames(cur_coembed))
+cur_coembed@reductions$umap@cell.embeddings <- monocle_umap
+cur_coembed$UMAP_1 <- cur_coembed@reductions[['umap']]@cell.embeddings[,1]
+cur_coembed$UMAP_2 <- cur_coembed@reductions[['umap']]@cell.embeddings[,2]
+
+```
+
+
+Compute pseudotime trajectory on integrated data
+
+```{r eval=FALSE}
+
+# pseudotime with monocle3
+cur_cds <- cluster_cells(cur_cds, reduction_method='UMAP')
+print(length(unique(partitions(cur_cds))))
+cur_cds <- learn_graph(cur_cds)
+
+pdf(paste0("figures/", cur_celltype, "/", cur_celltype, "_coembed_monocle_trajectory_default_pseudotime.pdf"), width=7, height=6)
+for(j in 1:length(unique(partitions(cur_cds)))){
+  print(j)
+  cur_cds = order_cells(
+    cur_cds,
+    root_pr_nodes = get_earliest_principal_node(
+      cur_cds,
+      partition = j
+    )
+  )
+  p <- plot_cells(
+    cur_cds,
+    color_cells_by = "pseudotime",
+    label_cell_groups=FALSE,
+    label_leaves=FALSE,
+    label_branch_points=FALSE,
+    graph_label_size=1.5
+  )
+  print(p)
+}
+dev.off()
+
+# save seurat obj and cds
+saveRDS(cur_coembed, file=paste0('data/',cur_celltype,'_seurat_coembed.rds'))
+saveRDS(cur_cds, file=paste0('data/',cur_celltype,'_cds_coembed.rds'))
+
+```

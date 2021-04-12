@@ -1,5 +1,67 @@
 
 
+Plot LDSC enrichment heatmap
+```{r eval=FALSE}
+
+library(tidyverse)
+library(ggplot2)
+
+results_dir <- "results/"
+fig_dir <- "figures/"
+
+############################################################################
+# create enrichment heatmap
+############################################################################
+
+results_files <- dir(results_dir)[grepl('.results', dir(results_dir))]
+
+celltypes <- c('ASC', 'EX', 'INH', 'MG', 'ODC', 'OPC', 'PEREND')
+
+# combine all results into a single table:
+enrichment_df <- data.frame()
+for(i in 1:length(results_files)){
+
+  df <- read.table(paste0(results_dir, results_files[i]), sep='\t', header=TRUE)
+
+  temp <- lapply(celltypes, function(x){grepl(x, df$Category)})
+  valid_categories <- Reduce(rbind, temp) %>% colSums %>% as.logical
+  df <- df %>% subset(valid_categories)
+
+  # add a column for the trait
+  df$Trait <- strsplit(results_files[i], '.results')[[1]]
+
+  enrichment_df <- rbind(enrichment_df, df)
+}
+enrichment_df$Category <- do.call(rbind, strsplit(as.character(enrichment_df$Category), 'L2_0'))[,1]
+enrichment_df$FDR <- p.adjust(enrichment_df$Enrichment_p, method='fdr')
+measure <- 'FDR'
+enrichment_df$Significance <- ifelse(enrichment_df[[measure]] > 0.05, '', ifelse(enrichment_df[[measure]] > 0.005, '*', ifelse(enrichment_df[[measure]] > 0.0005, '**', '***')))
+
+write.table(enrichment_df, 'data/ldsc_enrichments.tsv', sep='\t', quote=FALSE, row.names=FALSE)
+
+# cutoffs for enrichment values:
+max_enrichment <- 50; min_enrichment <- -50;
+plot_df <- enrichment_df
+plot_df$Enrichment <- ifelse(plot_df$Enrichment > max_enrichment, max_enrichment, ifelse(plot_df$Enrichment < min_enrichment, min_enrichment, plot_df$Enrichment))
+
+# plot heatmap of results
+p <- ggplot(plot_df, aes(Category, Trait, fill=Enrichment)) +
+  geom_tile() +
+  geom_text(aes(label=Significance)) +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, space = "Lab") +
+  xlab('') + ylab('') +
+  theme_minimal() +
+  theme(
+    axis.text.x=element_text(angle=90, vjust=0.5),
+    axis.ticks=element_blank()
+  )
+
+pdf(paste0(fig_dir, 'enrichment_heatmap_', fig_name, '.pdf'), width=10, height=4)
+print(p)
+dev.off()
+
+
+```
 
 ## Plot co-accessibility of key GWAS loci
 
