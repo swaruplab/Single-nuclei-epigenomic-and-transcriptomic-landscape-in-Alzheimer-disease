@@ -1,0 +1,645 @@
+
+
+# Cross-species scRNA-seq integration
+
+In this section we load the relevant datasets, filter out low quality cells, and perform
+integration using online-iNMF.
+
+## Load data into Seurat
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(liger)
+library(tidyverse)
+library(cowplot)
+theme_set(theme_cowplot)
+
+# load data
+seurat_swarup <- readRDS(file="/dfs7/dfs3/swaruplab/smorabit/analysis/cross-disorder/data/seurat_objects/swarup_AD_2019_unprocessed.rds")
+seurat_tsai <- readRDS(file="/dfs7/dfs3/swaruplab/smorabit/analysis/cross-disorder/data/seurat_objects/tsai_AD_2019_unprocessed.rds")
+seurat_5xFAD <- readRDS(file="/dfs7/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/mouse_integration/data/zhou_5xFAD_ProcessedSeuratFinal.rds")
+seurat_zhou <- readRDS(file="/dfs7/dfs3/swaruplab/smorabit/analysis/cross-disorder/data/seurat_objects/trem2_nmed_unprocessed.rds")
+
+fig_dir = 'figures/'
+data_dir = 'data/'
+
+# load mouse gene annotations:
+load('/dfs7/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/data/Annotations/hg38_mm10_ortho.rda')
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+```
+
+## Quality Control
+
+Remove cells in all datasets that do not meet QC criteria.
+
+```{r eval=FALSE}
+
+seurat_zhou[["percent.mt"]] <- PercentageFeatureSet(seurat_zhou, pattern = "^MT-")
+seurat_zhou <- subset(seurat_zhou, TREM2.Genotype == 'WT')
+seurat_zhou <- subset(seurat_zhou, percent.mt <= 10 & nCount_RNA >= 500 & nCount_RNA <= 25000)
+
+```
+
+## online iNMF integration
+
+For the mouse dataset, only retain genes with a human ortholog. Then, apply
+online-iNMF to integrate datasets, using `k=30` matrix factors.
+
+```{r eval=FALSE}
+
+genes.human <- as.character(ensembl[na.omit(match(rownames(seurat_5xFAD ),ensembl$Mouse.gene.name)),'Gene.name'])
+genes.mouse <- as.character(ensembl[na.omit(match(rownames(seurat_5xFAD ),ensembl$Mouse.gene.name)),'Mouse.gene.name'])
+
+# subset by genes that have a human homolog:
+seurat_5xFAD <- seurat_5xFAD[genes.mouse,]
+
+# get expression matrices for iNMF integration:
+counts_list <- list(
+  swarup_Control = GetAssayData(seurat_swarup, slot='counts'),
+  tsai_Control = GetAssayData(seurat_tsai, slot='counts'),
+  zhou_human_Control = GetAssayData(seurat_zhou, slot='counts'),
+  zhou_5xFAD = GetAssayData(seurat_5xFAD, slot='counts')
+)
+rownames(counts_list$zhou_5xFAD_AD) <- genes.human
+rownames(counts_list$zhou_5xFAD_Control) <- genes.human
+
+# LIGER processing
+a.NucSeq <- createLiger(counts_list)
+a.NucSeq <- normalize(a.NucSeq)
+pdf(paste0(fig_dir, "liger_variable_genes.pdf"), width=8, height=8)
+a.NucSeq <- selectGenes(a.NucSeq, var.thresh =c(0.3, 0.075, 0.1, 0.1), do.plot=T)
+dev.off()
+a.NucSeq <- scaleNotCenter(a.NucSeq)
+
+# perform online iNMF
+a.NucSeq = online_iNMF(a.NucSeq, k = 30, max.epochs = 5)
+
+# quantile normalization
+a.NucSeq  = quantile_norm(a.NucSeq)
+a.NucSeq  = runUMAP(a.NucSeq)
+
+pdf(paste0(fig_dir, 'liger_umap.pdf'), width=8, height=8)
+plotByDatasetAndCluster(a.NucSeq, axis.labels = c("UMAP1","UMAP2"))
+dev.off()
+
+calcAlignment(a.NucSeq)
+# 0.8248923
+
+saveRDS(a.NucSeq, file = paste0(data_dir, "5xFAD_human_integrated_liger.rds"))
+a.NucSeq <- readRDS(file = paste0(data_dir, "5xFAD_human_integrated_liger.rds"))
+
+```
+
+# Processing integrated dataset
+
+```{r eval=FALSE}
+
+seurat_obj <- LigerToSeurat(a.NucSeq)
+seurat_obj <- RenameCells(seurat_obj, new.names=rownames(a.NucSeq@cell.data))
+
+seurat_meta <- rbind(
+  seurat_swarup@meta.data %>% select(SampleID, Diagnosis, Cell.Type),
+  seurat_tsai@meta.data %>% select(SampleID, Diagnosis, Cell.Type),
+  seurat_zhou@meta.data %>% select(SampleID, Diagnosis, Cell.Type),
+  seurat_5xFAD@meta.data %>% select(SampleID, Diagnosis, Cell.Type),
+)
+
+seurat_meta <- seurat_meta[match(colnames(seurat_obj), rownames(seurat_meta)),]
+all.equal(rownames(seurat_meta), colnames(seurat_obj))
+
+seurat_obj <- AddMetaData(seurat_obj, seurat_meta)
+
+meta_list <- seurat_obj@meta.data %>%
+  dplyr::group_split(SampleID)
+
+lapply(meta_list, function(x){
+  table(x$Diagnosis)
+})
+
+# transfer relevant metadata:
+seurat_obj$Dataset <- a.NucSeq@cell.data$dataset
+seurat_obj$Species <- ifelse(seurat_obj$Dataset == 'zhou_5xFAD', 'Mouse', 'Human')
+
+seurat_5xFAD$Cell.Type <- NA
+seurat_zhou$Cell.Type <- NA
+seurat_obj$original_celltype <- c(as.character(seurat_swarup$Cell.Type), as.character(seurat_tsai$Cell.Type),as.character(seurat_zhou$Cell.Type), as.character(seurat_5xFAD$Cell.Type))
+
+# delete individual seurat objects to save memory:
+rm(seurat_swarup, seurat_zhou, seurat_5xFAD, seurat_tsai, a.NucSeq, counts_list); gc();
+
+# processing
+seurat_obj <- NormalizeData(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunUMAP(seurat_obj , reduction = "inmf", dims = 1:dim(seurat_obj [["inmf"]])[2])
+
+```
+
+## Compute clusters using monocle3
+
+```{r eval=FALSE}
+
+library(monocle3)
+
+expr_matrix <- Matrix(GetAssayData(seurat_obj, slot='counts'), sparse=T)
+genes <- data.frame(as.character(rownames(expr_matrix)))
+rownames(genes) <- rownames(expr_matrix)
+genes <- as.data.frame(cbind(genes,genes))
+colnames(genes) <- c("GeneSymbol", "gene_short_name")
+cds <- monocle3::new_cell_data_set(
+  expr_matrix,
+  cell_metadata=seurat_obj@meta.data,
+  gene_metadata=genes
+)
+
+reducedDims(cds)$PCA <- seurat_obj[['inmf']]@cell.embeddings
+reducedDims(cds)$UMAP <- seurat_obj[['umap']]@cell.embeddings
+
+# clustering
+cds <- cluster_cells(cds)
+
+seurat_obj$monocle_clusters <- clusters(cds)
+seurat_obj$monocle_partitions <- partitions(cds)
+
+saveRDS(seurat_obj, file=paste0(data_dir, '5xFAD_human_integrated_seurat.rds'))
+seurat_obj <- readRDS(file=paste0(data_dir, '5xFAD_human_integrated_seurat.rds'))
+
+```
+
+## Data visualization
+
+```{r eval=FALSE}
+
+# dataset of origin
+png(paste0(fig_dir, 'umap_dataset_split.png'), width=10, height=10, res=400, units='in')
+DimPlot(seurat_obj, group.by='Dataset', split.by='Dataset', ncol=2) + umap_theme + NoLegend()
+dev.off()
+
+# original cell type
+png(paste0(fig_dir, 'umap_original_celltype.png'), width=8, height=8, res=400, units='in')
+DimPlot(seurat_obj, group.by='original_celltype', label=TRUE, cols=unlist(color_scheme_snRNA_celltype)) + umap_theme + NoLegend()
+dev.off()
+
+# original cell type split by dataset
+png(paste0(fig_dir, 'umap_original_celltype_split.png'), width=11, height=10, res=400, units='in')
+DimPlot(seurat_obj, group.by='original_celltype', split.by='Dataset', cols=unlist(color_scheme_snRNA_celltype), ncol=2) + umap_theme
+dev.off()
+
+# Datasets split by diagnosis
+png(paste0(fig_dir, 'umap_diagnosis_split.png'), width=11, height=10, res=400, units='in')
+DimPlot(seurat_obj, group.by='Diagnosis', split.by='Dataset', ncol=2) + umap_theme
+dev.off()
+
+# clusters
+png(paste0(fig_dir, 'umap_clusters.png'), width=8, height=8, res=400, units='in')
+DimPlot(seurat_obj, group.by='monocle_clusters', label=TRUE) + umap_theme + NoLegend()
+dev.off()
+
+# partitions
+png(paste0(fig_dir, 'umap_partitions.png'), width=8, height=8, res=400, units='in')
+DimPlot(seurat_obj, group.by='monocle_partitions', label=TRUE) + umap_theme + NoLegend()
+dev.off()
+
+
+```
+
+## iNMF matrix factor analysis
+
+```{r eval=FALSE}
+
+################################################################################
+# feature plots for all 30 matrix factors:
+################################################################################
+
+plot_list <- FeaturePlot(
+  seurat_obj,
+  features=paste0('iNMF_', 1:30),
+  combine=FALSE, cols=viridis(256),
+  max.cutoff='q99'
+)
+
+# apply theme to each feature plot
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + umap_theme + NoLegend()
+}
+
+png(paste0(fig_dir, 'umap_inmf_featureplot.png'), width=12, height=10, units='in', res=200)
+CombinePlots(plot_list, ncol=6)
+dev.off()
+
+################################################################################
+# Dot Plot for all 30 matrix factors:
+################################################################################
+
+png(paste0(fig_dir, 'umap_inmf_dotplot.png'), width=12, height=6, units='in', res=200)
+DotPlot(seurat_obj, features=colnames(seurat_obj[["inmf"]]), group.by="Cell.Type") + RotatedAxis()
+dev.off()
+
+################################################################################
+# Gene loadings for iNMF 8 & 16 (high in MG)
+################################################################################
+
+png(paste0(fig_dir, 'umap_inmf_loadings.png'), width=6, height=6, units='in', res=200)
+VizDimLoadings(seurat_obj, dims=c(8, 16), reduction='inmf') + RotatedAxis()
+dev.off()
+
+```
+
+## Microglia-specific UMAP and clustering
+
+Use iNMF to construct a new metagene space for the microglia subset:
+
+```{r eval=FALSE}
+
+# subset just microglia
+seurat_mg <- subset(seurat_obj, Cell.Type == 'MG')
+
+expr_matrix <- GetAssayData(seurat_mg, slot='counts')
+
+expression_list <- list(
+  'swarup' = expr_matrix[,colnames(seurat_mg)[seurat_mg$Dataset == 'swarup']],
+  'tsai' = expr_matrix[,colnames(seurat_mg)[seurat_mg$Dataset == 'tsai']],
+  'zhou_5xFAD' = expr_matrix[,colnames(seurat_mg)[seurat_mg$Dataset == 'zhou_5xFAD']],
+  'zhou_human' = expr_matrix[,colnames(seurat_mg)[seurat_mg$Dataset == 'zhou_human']]
+)
+
+seurat_meta <- rbind(
+  subset(seurat_mg@meta.data, Dataset == 'swarup'),
+  subset(seurat_mg@meta.data, Dataset == 'tsai'),
+  subset(seurat_mg@meta.data, Dataset == 'zhou_5xFAD'),
+  subset(seurat_mg@meta.data, Dataset == 'zhou_human')
+)
+
+# create liger object:
+a.NucSeq <- createLiger(expression_list)
+
+a.NucSeq <- normalize(a.NucSeq)
+pdf("figures/liger_variable_genes.pdf", width=8, height=8)
+a.NucSeq <- selectGenes(
+  a.NucSeq,
+  var.thresh =c(0.15, 0.05, 0.0125, 0.0125),
+  do.plot=T
+)
+dev.off()
+a.NucSeq@var.genes %>% length
+a.NucSeq <- scaleNotCenter(a.NucSeq)
+
+# perform online iNMF
+a.NucSeq <- online_iNMF(a.NucSeq, k=15, max.epochs=5)
+
+# quantile normalization
+a.NucSeq <- quantile_norm(a.NucSeq)
+a.NucSeq <- runUMAP(a.NucSeq)
+
+pdf('figures/liger_umap_mg.pdf', width=8, height=7)
+plotByDatasetAndCluster(a.NucSeq, axis.labels = c("UMAP1","UMAP2"))
+dev.off()
+
+# transfer iNMF matrix to seurat obj:
+seurat_mg@reductions$ctiNMF <- CreateDimReducObject(
+    loadings=t(a.NucSeq@W),
+    embeddings=a.NucSeq@H.norm[colnames(seurat_mg),],
+    key="ctiNMF_",
+    assay="RNA"
+  )
+VariableFeatures(seurat_mg) <- a.NucSeq@var.genes
+
+# scale expression data:
+seurat_mg <- ScaleData(seurat_mg, features=VariableFeatures(seurat_mg))
+
+# UMAP + clustering:
+seurat_mg <- RunUMAP(seurat_mg, reduction='ctiNMF', dims=1:15)
+seurat_mg <- FindNeighbors(seurat_mg, reduction='ctiNMF', dims=1:15)
+seurat_mg <- FindClusters(seurat_mg, resolution=0.3, algorithm=4)
+table(seurat_mg$seurat_clusters)
+seurat_mg$celltype_clusters <- seurat_mg$seurat_clusters
+
+png(paste0(fig_dir, 'umap_microglia.png'), width=6, height=5, res=400, units='in')
+DimPlot(seurat_mg, group.by='celltype_clusters', label=TRUE) + umap_theme + NoLegend()
+dev.off()
+
+png(paste0(fig_dir, 'umap_microglia_noLabels.png'), width=6, height=5, res=400, units='in')
+DimPlot(seurat_mg, group.by='celltype_clusters') + umap_theme + NoLegend()
+dev.off()
+
+png(paste0(fig_dir, 'umap_microglia_species.png'), width=8, height=4, res=400, units='in')
+DimPlot(seurat_mg, group.by='Diagnosis', split.by='Species') + umap_theme
+dev.off()
+
+png(paste0(fig_dir, 'umap_microglia_split.png'), width=8, height=7, res=400, units='in')
+DimPlot(seurat_mg, group.by='Diagnosis', split.by='Dataset', ncol=2) + umap_theme
+dev.off()
+
+# save
+saveRDS(seurat_mg, paste0(data_dir, 'integrated_microglia.rds'))
+
+```
+
+![Microglia UMAP colored by microglia subclusters](./figures/mouse-integration/umap_microglia.png)
+
+![Microglia UMAP colored by Diagnosis, split by Dataset](./figures/mouse-integration/umap_microglia_split.png)
+
+![Microglia UMAP colored by Diagnosis, split by Species](./figures/mouse-integration/umap_microglia_species.png)
+
+## Compositional Analysis:
+
+Here we inspect the composition of each cluster with respect to several factors such
+as species, dataset of origin, and AD status.
+```{r eval=FALSE}
+
+library(ggpubr)
+theme_set(theme_cowplot())
+
+################################################################################
+# Proportion of microglia as box plot
+################################################################################
+meta_list <- seurat_mg@meta.data %>%
+  dplyr::group_split(SampleID)
+
+temp <- lapply(meta_list, function(meta){
+  print(table(meta$Diagnosis))
+  df <- as.data.frame(meta$celltype_clusters %>% table / nrow(meta))
+  colnames(df) <- c('cluster', 'proportion')
+  df$SampleID <- paste0(unique(meta$Dataset), '_', unique(meta$SampleID))
+  df$Diagnosis <- unique(meta$Diagnosis)
+  df$Dataset <- unique(meta$Dataset)
+  df$Species <- unique(meta$Species)
+  df
+})
+proportion_df <- Reduce(rbind, temp)
+
+# bar plot
+p <- ggplot(proportion_df, aes(y=proportion, x=reorder(cluster, -as.numeric(cluster)), fill=Diagnosis, shape=Diagnosis)) +
+  geom_boxplot(outlier.shape=NA, color='black') +
+  coord_flip() + xlab('microglia cluster') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position="bottom",
+  )
+
+pdf(paste0(fig_dir, 'microglia_composition_boxplot_species.pdf'), width=6, height=6)
+p + facet_grid(.~Species)
+dev.off()
+
+pdf(paste0(fig_dir, 'microglia_composition_boxplot_dataset.pdf'), width=6, height=6)
+p + facet_grid(.~Dataset)
+dev.off()
+
+
+```
+
+
+## Analysis of DAM signatures
+
+```{r eval=FALSE}
+
+homeostatic <- c('HEXB', 'CST3', 'CX3CR1', 'CTSD', 'CSF1R', 'CTSS', 'SPARC', 'TMSB4X', 'P2RY12', 'C1QA', 'C1QB')
+stage1_DAM <- c('TYROBP', 'CTSB', 'APOE', 'B2M', 'FTH1')
+stage2_DAM <- c('TREM2', 'AXL', 'CST7', 'CTSL', 'LPL', 'CD9', 'CSF1', 'ITGAX', 'CLEC7A', 'LILRB4', 'TIMP2')
+
+# select species
+spec = 'Human'
+spec = 'Mouse'
+
+# select list
+gene_list <- homeostatic; list_name <- 'homeostatic'
+gene_list <- stage1_DAM; list_name <- 'stage1_DAM'
+gene_list <- stage2_DAM; list_name <- 'stage2_DAM'
+
+plot_list <- list()
+for(gene in gene_list){
+  plot_list[[gene]] <- VlnPlot(
+    subset(seurat_mg, Diagnosis == 'AD'),
+    cols=c('darkgoldenrod3', 'hotpink3'),
+    features=gene,
+    pt.size=0,
+    split.by='Species', split.plot=TRUE
+  ) +
+  NoLegend() +
+  stat_compare_means(method='wilcox.test', label='p.signif', label.y=3) +
+  xlab('') + ylab(gene) + ggtitle('') +
+  theme(axis.title.y=element_text(face='bold.italic'))
+
+  if(gene == gene_list[length(gene_list)]){
+    theme(
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  } else{
+    plot_list[[gene]] <- plot_list[[gene]] +
+    theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  }
+}
+
+
+pdf(paste0(fig_dir, 'DAM_', list_name,'_vln.pdf'), width=6, height=length(gene_list)*2)
+wrap_plots(plot_list, ncol=1) & theme(
+    plot.margin = unit(c(0, 0, 0, 0.1), "in")
+)
+dev.off() 
+
+```
+
+### DAM stage gene score analysis
+
+```{r eval=FALSE}
+
+library(RColorBrewer)
+colfunc_modules <-  colorRampPalette((brewer.pal(9, 'GnBu' )[3:9]))
+
+seurat_mg <- AddModuleScore(
+  seurat_mg,
+  features=list('stage1_DAM'=stage1_DAM, 'stage2_DAM'=stage2_DAM, 'homeostatic'=homeostatic),
+  pool = rownames(seurat_mg), k=F, nbin=24,
+  name=c('stage1_DAM', 'stage2_DAM', 'homeostatic')
+)
+
+# whole dataset ################################################################
+order_values <- FALSE
+plot_list <- list()
+for(feat in c('stage1_DAM1', 'stage2_DAM2', 'homeostatic3')){
+  plot_list[[feat]] <- FeaturePlot(seurat_mg, features=feat, order=order_values) +
+    scale_color_gradient2(low=scales::muted('blue'), mid='white', high=scales::muted('red'),
+           guide = guide_colorbar(barwidth=15, barheight=0.5, ticks=FALSE)
+    ) + theme(
+         plot.margin = unit(c(0, 0, 0, 0), "in"),
+         legend.position='bottom'
+    ) + umap_theme + ggtitle('')
+}
+
+
+png(paste0(fig_dir, 'DAM_geneScore_featureplot.png'), width=12, height=4, units='in', res=300)
+plot_list[[3]] | plot_list[[1]] | plot_list[[2]]
+dev.off()
+
+# human dataset ################################################################
+plot_list <- list()
+for(feat in c('stage1_DAM1', 'stage2_DAM2', 'homeostatic3')){
+  plot_list[[feat]] <- FeaturePlot(subset(seurat_mg, Species=='Human'), features=feat, order=order_values) +
+    scale_color_gradient2(low=scales::muted('blue'), mid='white', high=scales::muted('red'),
+           guide = guide_colorbar(barwidth=15, barheight=0.5, ticks=FALSE)
+    ) + theme(
+         plot.margin = unit(c(0, 0, 0, 0), "in"),
+         legend.position='bottom'
+    ) + umap_theme + ggtitle('')
+}
+
+png(paste0(fig_dir, 'DAM_geneScore_featureplot_human.png'), width=12, height=4, units='in', res=300)
+plot_list[[3]] | plot_list[[1]] | plot_list[[2]]
+dev.off()
+
+# mouse dataset ################################################################
+plot_list <- list()
+for(feat in c('stage1_DAM1', 'stage2_DAM2', 'homeostatic3')){
+  plot_list[[feat]] <- FeaturePlot(subset(seurat_mg, Species=='Mouse'), features=feat, order=order_values) +
+    scale_color_gradient2(low=scales::muted('blue'), mid='white', high=scales::muted('red'),
+           guide = guide_colorbar(barwidth=15, barheight=0.5, ticks=FALSE)
+    ) + theme(
+         plot.margin = unit(c(0, 0, 0, 0), "in"),
+         legend.position='bottom'
+    ) + umap_theme + ggtitle('')
+}
+
+png(paste0(fig_dir, 'DAM_geneScore_featureplot_mouse.png'), width=12, height=4, units='in', res=300)
+plot_list[[3]] | plot_list[[1]] | plot_list[[2]]
+dev.off()
+
+
+
+
+# DAM score violin plots
+plot_list <- list()
+gene_list <- c('homeostatic3', 'stage1_DAM1', 'stage2_DAM2')
+for(gene in gene_list){
+  plot_list[[gene]] <- VlnPlot(subset(seurat_mg, Diagnosis=='AD'),features=gene, pt.size=0, split.by='Species', split.plot=TRUE, cols=c('darkgoldenrod3', 'hotpink3')) +
+  NoLegend() +
+  geom_hline(yintercept = 0, linetype='dashed')  +
+  stat_compare_means(method='wilcox.test', label='p.signif', label.y=1) +
+  xlab('') + ylab(gene) + ggtitle('') +
+  theme(axis.title.y=element_text(face='bold.italic'))
+
+  if(gene == gene_list[length(gene_list)]){
+    theme(
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  } else{
+    plot_list[[gene]] <- plot_list[[gene]] +
+    theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  }
+}
+
+pdf(paste0(fig_dir, 'DAM_geneScore_vln.pdf'), width=6, height=6)
+wrap_plots(plot_list, ncol=1) & theme(
+    plot.margin = unit(c(0, 0, 0, 0.1), "in")
+)
+dev.off()
+
+
+```
+
+Cluster 6 human vs mouse DEGs:
+
+```{r eval=FALSE}
+
+clusters <- as.numeric(levels(seurat_mg$seurat_clusters))
+species_DEGs <- data.frame()
+for(cur_cluster in clusters){
+  print(cur_cluster)
+  cur_seurat <- subset(seurat_mg, Diagnosis == 'AD' & seurat_clusters == cur_cluster)
+  Idents(cur_seurat) <- cur_seurat$Species
+
+  # skip if this cluster has fewer than 25 mouse or human cells
+  if(sum(cur_seurat$Species == 'Mouse') < 25 | sum(cur_seurat$Species == 'Human') < 25){next}
+
+  expr_mat <- GetAssayData(cur_seurat, slot='counts')
+  human_expr_mat <- expr_mat[,cur_seurat$Species == 'Human']
+  mouse_expr_mat <- expr_mat[,cur_seurat$Species == 'Mouse']
+
+  # what genes are non zero in human & mouse?
+  human_genes <- rownames(human_expr_mat)[rowSums(human_expr_mat) > 0]
+  mouse_genes <- rownames(mouse_expr_mat)[rowSums(mouse_expr_mat) > 0]
+
+  genes.keep <- intersect(human_genes, mouse_genes)
+
+  cur_seurat <- cur_seurat[genes.keep,]
+
+  cur_markers <- FindMarkers(
+    object = cur_seurat,
+    ident.1 = 'Human',
+    ident.2 = 'Mouse',
+    min.pct = 0.05,
+    logfc.threshold=0,
+    test.use = 'MAST'
+    #latent.vars = c('Age', 'nCount_RNA', 'nFeature_RNA')
+  )
+  cur_markers$gene <- rownames(cur_markers)
+  cur_markers$cluster <- cur_cluster
+
+  species_DEGs <- rbind(species_DEGs, cur_markers)
+
+}
+
+# save table as csv for supplement:
+write.csv(species_DEGs, file=paste0(data_dir, 'human_vs_mouse_DEGs.csv'), quote=FALSE)
+
+
+# save table as csv for supplement:
+write.csv(markers, file=paste0(data_dir, 'human_vs_mouse_cluster6_DEGs.csv'), quote=FALSE)
+
+# top 10 genes in human:
+human_top10 <- markers %>% top_n(10, wt=avg_logFC) %>% .$gene
+
+# color based on human / mouse
+markers$color <- ifelse(markers$avg_logFC >= 0, 'Human', 'Mouse')
+
+# annotate genes that are in the DAM lists:
+markers$anno <- ifelse(markers$gene %in% c(homeostatic, stage1_DAM, stage2_DAM, human_top10), markers$gene, NA)
+markers$gene_group <- ifelse(
+  markers$gene %in% homeostatic, 'gray40', ifelse(
+  markers$gene %in% stage1_DAM, 'black', ifelse(
+  markers$gene %in% stage2_DAM, 'black', ifelse(
+  markers$gene %in% human_top10, 'black', 'other'
+))))
+
+
+
+p<- ggplot(markers, aes(x=avg_logFC, y=-log10(p_val_adj), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c('darkgoldenrod3', 'hotpink3')) +
+  geom_text_repel(
+    inherit.aes=FALSE,
+    data=subset(markers, !is.na(anno)),
+    aes(x=avg_logFC, y=-log10(p_val_adj), label=anno),
+    color=subset(markers, gene_group != 'other') %>% .$gene_group
+  ) +
+  #ggtitle(paste(cluster)) +
+  xlim(-1*max(abs(markers$avg_logFC))-0.1, max(abs(markers$avg_logFC))+0.1)+
+  theme(legend.position='bottom', panel.grid.major = element_line(colour = "lightgrey")) + labs(color='')
+
+pdf(paste0(fig_dir, 'human_vs_mouse_DEGs.pdf'), width=5, height=5, useDingbats=FALSE)
+p
+dev.off()
+
+```
