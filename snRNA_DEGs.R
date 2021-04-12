@@ -104,9 +104,55 @@ write.csv(cluster.diagnosis.markers, file='data/cluster_diagnosis_markers.csv', 
 save(celltype.markers, celltype.diagnosis.markers, cluster.markers, cluster.diagnosis.markers, file='data/all_DEGs.rda')
 
 ################################################################################
-# volcano plots
+# Dot Plot
 ################################################################################
 
+# reverse idents
+Idents(NucSeq) <- factor(
+  as.character(Idents(NucSeq)),
+  levels = rev(levels(Idents(NucSeq)))
+)
+
+deg_list <- c(
+  "SLC6A11",
+  "TNC",
+  "CHI3L1",
+  "SLC15A2",
+  "LINC00507",
+  "IL1RAPL2",
+  "RIT2",
+  "CHRM2",
+  "RAB3A",
+  "CALB2",
+  "OPRD1",
+  "KLF5",
+  "SV2C",
+  "TLR2",
+  "CX3CR1", #OR P2RY12
+  "ETS1",
+  "ADAMTS18",
+  "CNDP1",
+  "CA2",
+  "OPALIN",
+  "CHRM5",
+  "ENPP6",
+  "SLC5A11",
+  "CRYAB",
+  "KLHL1",
+  "PMP2",
+  "WDR86",
+  "NOTCH3",
+  "FLT1"
+)
+
+pdf('figures/DEG_dotplot.pdf', width=9, height=5, useDingbats=F)
+DotPlot(NucSeq, features=deg_list, col.min=0.0, col.max=1.0, dot.min=0.20) + RotatedAxis() + scale_color_viridis(direction=-1) + xlab('') + ylab('')
+dev.off()
+
+
+################################################################################
+# volcano plots
+################################################################################
 
 load('data/all_DEGs.rda')
 

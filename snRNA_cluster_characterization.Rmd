@@ -1,0 +1,501 @@
+```{r eval=FALSE}
+library(tidyverse)
+library(Seurat)
+library(ggplot2)
+library(Matrix)
+library(ggrepel)
+library(grid)
+library(gridExtra)
+library(ggpubr)
+library(reshape2)
+library(RColorBrewer)
+
+# load seurat object
+NucSeq <- readRDS("celltype-analysis/data/NucSeq_batch_correct_seurat.rds")
+
+```
+
+
+### Cell type proportions:
+
+```{r eval=FALSE}
+
+cur_celltypes <- c('INH', 'EX')
+name = 'neuronal'
+w=4; h=6;
+
+cur_celltypes <- c('ASC', 'MG')
+name = 'glia'
+w=4; h=6;
+
+cur_celltypes <- c('ODC', 'OPC')
+name = 'oligo'
+w=4; h=7;
+
+seurat_obj <- subset(NucSeq, Cell.Type %in% cur_celltypes)
+meta_list <- seurat_obj@meta.data %>%
+  dplyr::group_split(Sample.ID)
+
+temp <- lapply(meta_list, function(meta){
+  print(table(meta$Diagnosis))
+  df <- as.data.frame(meta$monocle_clusters_umap_ID %>% table / nrow(meta))
+  colnames(df) <- c('cluster', 'proportion')
+  df$SampleID <- paste0(unique(meta$Dataset), '_', unique(meta$Sample.ID))
+  df$Diagnosis <- unique(meta$Diagnosis)
+  df
+})
+proportion_df <- Reduce(rbind, temp)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+# relevel for ODCs;
+proportion_df$cluster<- factor(
+  as.character(proportion_df$cluster),
+  levels=c('OPC1', 'OPC2', 'ODC13', 'ODC8', 'ODC12', 'ODC10', 'ODC5', 'ODC3', 'ODC7', 'ODC6', 'ODC11', 'ODC2', 'ODC9', 'ODC1', 'ODC4')
+)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+# box plot
+p <- ggplot(proportion_df, aes(y=proportion, x=reorder(cluster, -cluster_num), fill=Diagnosis)) +
+  geom_boxplot(outlier.shape=NA, color='black') +
+  coord_flip() +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position="bottom",
+  ) + xlab('')
+
+pdf(paste0('figures/', name, '_composition_boxplot.pdf'), width=w, height=h)
+p
+dev.off()
+
+
+```
+
+
+### Cell type proportions:
+
+```{r eval=FALSE}
+
+cur_celltype <- 'PER.END'
+seurat_obj <- subset(NucSeq, Cell.Type == cur_celltype)
+meta_list <- seurat_obj@meta.data %>%
+  dplyr::group_split(SampleID)
+
+temp <- lapply(meta_list, function(meta){
+  print(table(meta$Diagnosis))
+  df <- as.data.frame(meta$monocle_clusters_umap_ID %>% table / nrow(meta))
+  colnames(df) <- c('cluster', 'proportion')
+  df$SampleID <- paste0(unique(meta$Dataset), '_', unique(meta$SampleID))
+  df$Diagnosis <- unique(meta$Diagnosis)
+  df
+})
+proportion_df <- Reduce(rbind, temp)
+proportion_df$cluster_num <- as.numeric(str_replace_all(proportion_df$cluster, cur_celltype, ''))
+
+# box plot
+p <- ggplot(proportion_df, aes(y=proportion, x=reorder(cluster, -cluster_num), fill=Diagnosis)) +
+  geom_boxplot(outlier.shape=NA, color='black') +
+  coord_flip() +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position="bottom",
+  ) + xlab('')
+
+pdf(paste0('figures/', cur_celltype, '_8_boxplot.pdf'), width=6, height=6)
+p
+dev.off()
+
+
+cur_celltypes <- c('INH', 'EX')
+name = 'neuronal'
+w=4; h=6;
+
+cur_celltypes <- c('ASC', 'MG')
+name = 'glia'
+w=4; h=6;
+
+cur_celltypes <- c('ODC', 'OPC')
+name = 'oligo'
+w=4; h=7;
+
+seurat_obj <- subset(NucSeq, Cell.Type %in% cur_celltypes)
+meta_list <- seurat_obj@meta.data %>%
+  dplyr::group_split(Sample.ID)
+
+temp <- lapply(meta_list, function(meta){
+  print(table(meta$Diagnosis))
+  df <- as.data.frame(meta$monocle_clusters_umap_ID %>% table / nrow(meta))
+  colnames(df) <- c('cluster', 'proportion')
+  df$SampleID <- paste0(unique(meta$Dataset), '_', unique(meta$Sample.ID))
+  df$Diagnosis <- unique(meta$Diagnosis)
+  df
+})
+proportion_df <- Reduce(rbind, temp)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+# relevel for ODCs;
+proportion_df$cluster<- factor(
+  as.character(proportion_df$cluster),
+  levels=c('OPC1', 'OPC2', 'ODC13', 'ODC8', 'ODC12', 'ODC10', 'ODC5', 'ODC3', 'ODC7', 'ODC6', 'ODC11', 'ODC2', 'ODC9', 'ODC1', 'ODC4')
+)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+
+# box plot
+p <- ggplot(proportion_df, aes(y=proportion, x=reorder(cluster, -cluster_num), fill=Diagnosis)) +
+  geom_boxplot(outlier.shape=NA, color='black') +
+  coord_flip() +
+# stat_compare_means(method='wilcox.test', label='p.signif') +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position="bottom",
+  ) + xlab('')
+  #ylim(c(0, 0.4))
+
+pdf(paste0('figures/', name, '_composition_boxplot.pdf'), width=w, height=h)
+p
+dev.off()
+
+cur <- subset(proportion_df, cluster=='MG1')
+wilcox.test(
+  subset(cur, Diagnosis=='Control') %>% .$proportion,
+  subset(cur, Diagnosis=='AD') %>% .$proportion
+)
+
+
+```
+
+
+Compare to scDC (note: scDC analysis used in revision response letter but not in paper)
+```{r eval=FALSE}
+
+library(scDC)
+
+snRNA_meta <- read.csv('data/snRNA_meta.csv')
+snATAC_meta <- read.csv('data/snATAC_meta.csv')
+
+meta <- snRNA_meta
+
+# subset just ODC & OPC:
+meta <- snRNA_meta %>% subset(Cell.Type %in% c('ODC', 'OPC'))
+
+subject <- as.character(meta$SampleID)
+cellTypes <- as.character(meta$monocle_clusters_umap_ID) # vector of cell types or cell clusters
+cond <- as.character(meta$Diagnosis) # vector for condition (NucSeq$Diagnosis)
+
+condition_vec <- c()
+for(s in unique(subject)[order(unique(subject))]){
+
+  # get condition associated with this sample:
+  condition <- subset(meta, as.character(SampleID) == s) %>% .$Diagnosis %>% unique %>% as.character
+  condition_vec <- c(condition_vec, rep(condition, length(unique(cellTypes))))
+
+}
+
+
+
+res_scDC_noClust <- scDC_noClustering(cellTypes, subject, calCI = TRUE,
+                                     calCI_method = c("percentile", "BCa", "multinom"),
+                                     nboot = 50)
+
+pdf('figures/ODC_barplot.pdf', width=18, height=6)
+barplotCI(res_scDC_noClust, condition_vec)
+densityCI(res_scDC_noClust, condition_vec)
+dev.off()
+
+res_scDC_noClust$results %>% head
+
+
+res_GLM <- fitGLM(res_scDC_noClust, condition_vec,
+                  pairwise = FALSE)
+output <- summary(res_GLM$pool_res_fixed)
+write.csv(output, file='data/ODC_scDC_summary.csv', quote=FALSE, row.names=FALSE)
+summary(res_GLM$pool_res_random)
+
+
+################################################################################
+# scDC proportion plot
+################################################################################
+
+proportion_df <- res_scDC_noClust$results
+proportion_df$median <- apply(res_scDC_noClust$thetastar, 1, median)
+proportion_df$cond <- condition
+proportion_df$method <- factor(proportion_df$method, levels = c("BCa",
+   "percentile", "multinom"))
+n_method <- length(unique(proportion_df$method))
+n_celltype = length(unique(proportion_df$cellTypes))
+
+proportion_df <- dplyr::rename(proportion_df, cluster=cellTypes)
+AD_samples <- meta %>% subset(Diagnosis == 'AD') %>% .$Sample.ID %>% unique %>% as.character
+proportion_df$Diagnosis <- ifelse(proportion_df$subject %in% AD_samples, 'AD', 'Control')
+#proportion_df$proportion <- proportion_df$conf_high - proportion_df$conf_low
+proportion_df <- subset(proportion_df, method == 'BCa')
+
+
+proportion_df$cluster<- factor(
+  as.character(proportion_df$cluster),
+  levels=c('OPC1', 'OPC2', 'ODC13', 'ODC8', 'ODC12', 'ODC10', 'ODC5', 'ODC3', 'ODC7', 'ODC6', 'ODC11', 'ODC2', 'ODC9', 'ODC1', 'ODC4')
+)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+p1 <- ggplot(proportion_df, aes(y=median, x=reorder(cluster, -cluster_num), fill=Diagnosis)) +
+  geom_boxplot(outlier.shape=NA, color='black') +
+  coord_flip() +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position="bottom",
+  ) + xlab('')
+
+pdf('figures/ODC_composition_boxplot_scDC.pdf', width=4, height=7)
+p1
+dev.off()
+
+```
+
+# vlnplot for INH & EX genes:
+
+```{r eval=FALSE}
+
+# plot selected EX and INH markers
+gene_list <- c('LINC02306', 'RORB', 'THEMIS', 'FEZF2', 'SLC17A7', 'GAD2', 'VIP', 'PVALB', 'SST', 'LAMP5')
+plot_list <- list()
+cur_seurat <- subset(NucSeq, Cell.Type %in% c('INH', 'EX'))
+
+for(gene in gene_list){
+  plot_list[[gene]] <- VlnPlot(cur_seurat,features=gene, pt.size=0, split.by='Diagnosis', split.plot=TRUE) +
+  NoLegend() +
+  stat_compare_means(method='wilcox.test', label='p.signif', label.y=3) +
+  xlab('') + ylab(gene) + ggtitle('') +
+  theme(axis.title.y=element_text(face='bold.italic'))
+
+  if(gene == gene_list[length(gene_list)]){
+    theme(
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  } else{
+    plot_list[[gene]] <- plot_list[[gene]] +
+    theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  }
+}
+
+pdf('figures/vlnplot_Neuron_marker_genes.pdf', width=6, height=16)
+wrap_plots(plot_list, ncol=1) & theme(
+    plot.margin = unit(c(0, 0, 0, 0.1), "in")
+)
+dev.off()
+
+```
+
+
+# Cluster Oligodendrocyte marker genes:
+
+```{r eval=FALSE}
+
+# dot plot of top 5 markers in each cluster:
+cluster.markers$cluster <- factor(as.character(cluster.markers$cluster), levels=unique(as.character(cluster.markers$cluster))[order(unique(as.character(cluster.markers$cluster)))])
+
+# re-order factors by developmental trajectory:
+top_degs <- cluster.markers[as.logical(grepl('ODC', cluster.markers$cluster) + grepl('OPC', cluster.markers$cluster)),]
+
+
+top_degs <- top_degs %>%
+  group_by(cluster) %>%
+  top_n(25, wt=avg_logFC)
+length(unique(top_degs$gene))
+
+expression_matrix <- AverageExpression(cur_seurat, features=unique(top_degs$gene))
+expression_matrix <- expression_matrix$RNA
+
+# convert to Z score
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(expression_matrix, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+library(circlize)
+col_fun = colorRamp2(c(range(matrix_z)[1], 0, range(matrix_z)[2]), c("blue", "white", "red"))
+
+cn = colnames(matrix_z)
+
+# set row annotation as selected genes:
+# set annotation list
+gene_anno_list <- top_degs %>% top_n(1, wt=avg_logFC) %>% .$gene %>% unique
+more_gene_list <- c('SOX6', 'TPST1', 'ITPR2', 'CLU', 'RBFOX1','OLIG2', 'KLK6', 'OLIG1', 'MOG', 'OPALIN',  'ABCA6','APOLD1', 'PLP1', 'CNP', "MOBP", 'NEAT1' )
+gene_anno_list <- c(gene_anno_list, more_gene_list) %>% unique
+gene_anno_list <- gene_anno_list[gene_anno_list %in% rownames(matrix_z)]
+ha = rowAnnotation(foo = anno_mark(at = unlist(lapply(gene_anno_list, function(gene){which(rownames(matrix_z) == gene)})), labels = gene_anno_list))
+
+head(rownames(matrix_z))
+
+# hierarchical clustering:
+row_dend = dendsort(hclust(dist(matrix_z)))
+col_dend = dendsort(hclust(dist(t(matrix_z))))
+
+# plot heatmap
+pdf('figures/ODC/top25_degs_expression_heatmap.pdf', width=5, height=5)
+ComplexHeatmap::Heatmap(
+  matrix_z, show_column_names = FALSE, show_row_names=FALSE,
+  col = col_fun,
+  cluster_rows=row_dend,
+  bottom_annotation = HeatmapAnnotation(
+      text = anno_text(cn, rot = 45, location = unit(1, "npc"), just = "right"),
+      annotation_height = max_text_width(cn)
+  ),
+  right_annotation = ha
+)
+dev.off()
+
+
+################################################################################
+# make similar heatmap using scATAC-seq gene activity scores:
+################################################################################
+
+NucSeq.atac <- readRDS(file='/dfs7/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/celltype-analysis/data/NucSeq_processed_activity_qc_batch_correct.rds')
+DefaultAssay(NucSeq.atac) <- 'RNA'
+
+#reset idents
+Idents(NucSeq.atac) <- factor(as.character(NucSeq.atac$monocle_clusters_umap_ID), levels=unique(as.character(NucSeq.atac$monocle_clusters_umap_ID))[order(unique(as.character(NucSeq.atac$monocle_clusters_umap_ID)))])
+cur_seurat.atac <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% c('OPC', 'ODC'))
+
+# get pseudo-expression
+pseudoexpression_matrix <- AverageExpression(cur_seurat.atac, assay='RNA', slot='data', features=unique(top_degs$gene)[unique(top_degs$gene) %in% rownames(cur_seurat.atac)])
+pseudoexpression_matrix <- pseudoexpression_matrix$RNA
+
+# convert to Z score
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(pseudoexpression_matrix, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# set colnames (clusters)
+cn = colnames(matrix_z)
+
+# set annotation list
+gene_anno_list <- top_degs %>% top_n(1, wt=avg_logFC) %>% .$gene %>% unique
+gene_anno_list <- c(gene_anno_list, more_gene_list) %>% unique
+gene_anno_list <- gene_anno_list[gene_anno_list %in% rownames(matrix_z)]
+ha = rowAnnotation(foo = anno_mark(at = unlist(lapply(gene_anno_list, function(gene){which(rownames(matrix_z) == gene)})), labels = gene_anno_list))
+
+head(rownames(matrix_z))
+
+# hierarchical clustering:
+row_dend = dendsort(hclust(dist(matrix_z)))
+col_dend = dendsort(hclust(dist(t(matrix_z))))
+
+colfunc.atac <-  colorRampPalette(rev(brewer.pal(11, 'PRGn' )))
+
+# plot heatmap
+pdf('figures/ODC/top25_degs_pseudoexpression_heatmap_sort.pdf', width=5, height=5)
+ComplexHeatmap::Heatmap(
+  matrix_z, show_column_names = FALSE, show_row_names=FALSE,
+  col = colfunc.atac(256),
+  cluster_rows = row_dend, cluster_columns = col_dend,
+  bottom_annotation = HeatmapAnnotation(
+      text = anno_text(cn, rot = 45, location = unit(1, "npc"), just = "right"),
+      annotation_height = max_text_width(cn)
+  ),
+  right_annotation = ha
+)
+dev.off()
+
+```
+
+
+vlnplot for ODCs
+
+```{r eval=FALSE}
+
+# subset cells and reset idents by proposed developmental lineage
+cur_seurat <- subset(NucSeq, Cell.Type %in% c('ODC', 'OPC'))
+Idents(cur_seurat) <- factor(
+  cur_seurat$monocle_clusters_umap_ID,
+  levels = c('OPC1', 'OPC2', 'ODC13','ODC12', 'ODC2','ODC7', 'ODC8', 'ODC10', 'ODC1', 'ODC3', 'ODC4', 'ODC5', 'ODC6', 'ODC9', 'ODC11')
+)
+
+gene_list <- c(
+  'VCAN', #OPC
+  'ITPR2', # NFOL
+  'CD74',
+  'APOLD1', # disease enriched ODCs
+  'OPALIN', # mature / myelinating
+  'CNP',
+  'MOG' # mature / myelinating
+)
+
+
+plot_list <- list()
+
+for(gene in gene_list){
+  plot_list[[gene]] <- VlnPlot(cur_seurat,features=gene, pt.size=0, split.by='Diagnosis', split.plot=TRUE) +
+  NoLegend() +
+  stat_compare_means(method='wilcox.test', label='p.signif', label.y=3) +
+  xlab('') + ylab(gene) + ggtitle('') +
+  theme(axis.title.y=element_text(face='bold.italic'))
+
+  if(gene == gene_list[length(gene_list)]){
+    theme(
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  } else{
+    plot_list[[gene]] <- plot_list[[gene]] +
+    theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  }
+}
+
+pdf('figures/vlnplot_ODC_marker_genes_less.pdf', width=8, height=10)
+wrap_plots(plot_list, ncol=1) & theme(
+    plot.margin = unit(c(0, 0, 0, 0.1), "in")
+)
+dev.off()
+
+```
+
+
+vlnplot for ASC & MG:
+
+```{r eval=FALSE}
+
+
+gene_list <- c('GFAP', 'WIF1', 'TNC', 'CHI3L1', 'ADAMTS17', 'CD163', 'SPP1', 'CX3CR1', 'ETS1')
+
+# plot selected EX and INH markers
+plot_list <- list()
+cur_seurat <- subset(NucSeq, Cell.Type %in% c('ASC', 'MG'))
+
+for(gene in gene_list){
+  plot_list[[gene]] <- VlnPlot(cur_seurat,features=gene, pt.size=0, split.by='Diagnosis', split.plot=TRUE) +
+  NoLegend() +
+  stat_compare_means(method='wilcox.test', label='p.signif', label.y=3) +
+  xlab('') + ylab(gene) + ggtitle('') +
+  theme(axis.title.y=element_text(face='bold.italic'))
+
+  if(gene == gene_list[length(gene_list)]){
+    theme(
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  } else{
+    plot_list[[gene]] <- plot_list[[gene]] +
+    theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  }
+}
+
+pdf('figures/vlnplot_ASC_MG_marker_genes.pdf', width=6, height=16)
+wrap_plots(plot_list, ncol=1) & theme(
+    plot.margin = unit(c(0, 0, 0, 0.1), "in")
+)
+dev.off()
+
+```
