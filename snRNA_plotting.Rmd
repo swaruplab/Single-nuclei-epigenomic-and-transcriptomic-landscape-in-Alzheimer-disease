@@ -351,3 +351,95 @@ print(p)
 dev.off()
 
 ```
+
+```{r eval=FALSE}
+
+
+
+## Supplemental Figure 2:
+
+iNMF batch correction analysis for snRNA-seq dataset
+
+## Supplemental Figure 3:
+
+snATAC-seq categorical variables and batch correction
+
+```{r eval=FALSE}
+
+# run PCA umap
+NucSeq.uncorrected <- RunUMAP(NucSeq, reduction='pca', dims=1:30)
+NucSeq.uncorrected$Batch <- as.factor(NucSeq.uncorrected$Batch)
+
+# plot uncorrected batches combined:
+png('for_paper/supplemental2/snRNA_batches_uncorrected.png', width=12, height=12, res=500, units='in')
+DimPlot(NucSeq.uncorrected, group.by='Batch', label=F, pt.size=.1) + my_theme + NoLegend()
+dev.off()
+
+# plot corrected batches combined:
+png('for_paper/supplemental2/snRNA_batches_corrected.png', width=12, height=12, res=500, units='in')
+DimPlot(NucSeq, group.by='Batch', label=F, pt.size=.1) + my_theme + NoLegend()
+dev.off()
+
+# plot iNMF dotplot
+pdf("for_paper/supplemental2/inmf_dotplot_celltype.pdf", width=12, height=6, useDingbats=F)
+DotPlot(NucSeq, features=colnames(NucSeq[["inmf"]]), group.by="Cell.Type") + RotatedAxis()
+dev.off()
+
+# plot iNMF feature plots ######################################################
+
+# iNMF 2 (OPC)
+png('for_paper/supplemental2/featureplots/iNMF2_umap_featureplot.png', width=5, height=5, res=1000, units='in')
+FeaturePlot(NucSeq, features='iNMF_2', cols=viridis(256), order=T, max.cutoff='q99') + my_theme + ggtitle('')
+dev.off()
+
+# iNMF 4 (ODC)
+png('for_paper/supplemental2/featureplots/iNMF4_umap_featureplot.png', width=5, height=5, res=1000, units='in')
+FeaturePlot(NucSeq, features='iNMF_4', cols=viridis(256), order=T, max.cutoff='q99') + my_theme + ggtitle('')
+dev.off()
+
+# iNMF 13 (ASC)
+png('for_paper/supplemental2/featureplots/iNMF13_umap_featureplot.png', width=5, height=5, res=1000, units='in')
+FeaturePlot(NucSeq, features='iNMF_13', cols=viridis(256), order=T, max.cutoff='q99') + my_theme + ggtitle('')
+dev.off()
+
+# iNMF 14 (MG)
+png('for_paper/supplemental2/featureplots/iNMF14_umap_featureplot.png', width=5, height=5, res=1000, units='in')
+FeaturePlot(NucSeq, features='iNMF_14', cols=viridis(256), order=T, max.cutoff='q99') + my_theme + ggtitle('')
+dev.off()
+
+# iNMF 15 (EX)
+png('for_paper/supplemental2/featureplots/iNMF15_umap_featureplot.png', width=5, height=5, res=1000, units='in')
+FeaturePlot(NucSeq, features='iNMF_15', cols=viridis(256), order=T, max.cutoff='q99') + my_theme + ggtitle('')
+dev.off()
+
+# iNMF 23 (INH)
+png('for_paper/supplemental2/featureplots/iNMF23_umap_featureplot.png', width=5, height=5, res=1000, units='in')
+FeaturePlot(NucSeq, features='iNMF_23', cols=viridis(256), order=T, max.cutoff='q99') + my_theme + ggtitle('')
+dev.off()
+
+
+# iNMF top genes:
+dims <- c(2,4,13,14,15,23)
+
+for(d in dims){
+  p <- VizDimLoadings(NucSeq, reduction='inmf', dims=d)
+
+  pdf(paste0('figures/inmf_factor_', d, '_top_genes.pdf'), width=3, height=6, useDingbats=FALSE)
+  print(p)
+  dev.off()
+}
+
+
+# iNMF genes for mathys et al analysis:
+dims <- c(2, 6, 27, 29)
+
+for(d in dims){
+  p <- VizDimLoadings(NucSeq.joint, reduction='inmf', dims=d)
+
+  pdf(paste0('figures/mathys_inmf_factor_', d, '_top_genes.pdf'), width=3, height=6, useDingbats=FALSE)
+  print(p)
+  dev.off()
+}
+
+
+```

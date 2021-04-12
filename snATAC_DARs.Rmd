@@ -1,0 +1,341 @@
+
+## Seurat DARs
+
+Celltype and cluster DARs
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+
+NucSeq.atac <- readRDS(file='data/NucSeq_macs2Peaks_signac.rds')
+
+# compute DARs for celltypes:
+Idents(NucSeq.peaks) <- NucSeq.peaks$monocle_clusters_umap_Cell.Type
+celltype_peaks <- FindAllMarkers(
+  object = NucSeq.peaks,
+  min.pct = 0.05,
+  logfc.threshold=0,
+  test.use = 'LR'
+)
+save(celltype_peaks, file='data/celltype_DARs.rda')
+
+Idents(NucSeq.peaks) <- NucSeq.peaks$monocle_clusters_umap_ID
+cluster_peaks <- FindAllMarkers(
+  object = NucSeq.peaks,
+  min.pct = 0.05, # min.pct = 0.1 for cluster_DARs2
+  logfc.threshold=0.0,
+  test.use = 'LR'
+)
+save(cluster_peaks, file='data/cluster_DARs.rda')
+
+```
+
+Diagnosis DARs:
+```{r eval=FALSE}
+
+# control vs AD in each celltype
+diagnosis_celltype_peaks <- data.frame()
+for(celltype in unique(NucSeq.peaks$monocle_clusters_umap_Cell.Type)){
+  print(celltype)
+  cur_seurat <- NucSeq.peaks[,NucSeq.peaks$monocle_clusters_umap_Cell.Type == celltype]
+
+  Idents(cur_seurat) <- cur_seurat$Diagnosis
+  cur_markers <- FindMarkers(
+    object = cur_seurat,
+    ident.1 = 'AD',
+    ident.2 = 'Control',
+    min.pct = 0.05,
+    logfc.threshold=0,
+    test.use = 'LR'
+  )
+  cur_markers$cluster <- celltype
+  cur_markers$gene <- rownames(cur_markers)
+  diagnosis_celltype_peaks <- rbind(diagnosis_celltype_peaks, cur_markers)
+}
+save(diagnosis_celltype_peaks, file='data/diagnosis_celltype_DARs.rda')
+
+# control vs AD in each cluster
+diagnosis_cluster_peaks <- data.frame()
+for(celltype in unique(NucSeq.peaks$monocle_clusters_umap_ID)){
+  print(celltype)
+  cur_seurat <- NucSeq.peaks[,NucSeq.peaks$monocle_clusters_umap_ID == celltype]
+
+  Idents(cur_seurat) <- cur_seurat$Diagnosis
+  cur_markers <- FindMarkers(
+    object = cur_seurat,
+    ident.1 = 'AD',
+    ident.2 = 'Control',
+    min.pct = 0.05,
+    logfc.threshold=0,
+    test.use = 'LR'
+  )
+  cur_markers$cluster <- celltype
+  cur_markers$gene <- rownames(cur_markers)
+  diagnosis_cluster_peaks <- rbind(diagnosis_cluster_peaks, cur_markers)
+  print(dim(cur_markers))
+}
+save(diagnosis_cluster_peaks, file='data/diagnosis_cluster_DARs.rda')
+load(file='data/diagnosis_cluster_DARs.rda')
+
+all.equal(rownames(cur_markers), rownames(subset(diagnosis_celltype_peaks, cluster=='OPC')))
+
+
+```
+
+
+Write DARs to bed files
+
+```{r eval=FALSE}
+
+library(Signac)
+
+dir.create('data/DARs/cluster')
+
+# load DARs:
+load(file='data/celltype_DARs.rda')
+load(file='data/cluster_DARs3.rda')
+load(file='data/diagnosis_celltype_DARs.rda')
+load(file='data/diagnosis_cluster_DARs.rda')
+
+# write to tsv files for the paper!!!
+celltype_peaks <- dplyr::rename(celltype_peaks, c(Peak=gene, cell_type=cluster))
+cluster_peaks <- dplyr::rename(cluster_peaks, c(Peak=gene))
+diagnosis_celltype_peaks <- dplyr::rename(diagnosis_celltype_peaks, c(Peak=gene, cell_type=cluster))
+diagnosis_cluster_peaks <- dplyr::rename(diagnosis_cluster_peaks, Peak=gene)
+
+write.table(celltype_peaks, file='data/celltype_DARs.tsv', sep='\t', quote=FALSE, row.names=FALSE)
+write.table(cluster_peaks, file='data/cluster_DARs.tsv', sep='\t', quote=FALSE, row.names=FALSE)
+write.table(diagnosis_celltype_peaks, file='data/diagnosis_celltype_DARs.tsv', sep='\t', quote=FALSE, row.names=FALSE)
+write.table(diagnosis_cluster_peaks, file='data/diagnosis_cluster_DARs.tsv', sep='\t', quote=FALSE, row.names=FALSE)
+
+DAR_list <- list(
+  "celltype" = celltype_peaks,
+  "cluster" = cluster_peaks,
+  "diagnosis_celltype" = diagnosis_celltype_peaks,
+  "diagnosis_cluster" = diagnosis_cluster_peaks
+)
+
+# peak names in ArchR that are same style
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), ':', start(proj@peakSet), '-', end(proj@peakSet))
+
+# write all peaks to file to serve as background set:
+peak_ranges <- Signac::StringToGRanges(proj@peakSet$site_name, sep = c(":", "-")) %>% sort
+write.table(
+  as.data.frame(peak_ranges)[,1:3],
+  file='data/DARs/allPeaks.bed',
+  row.names=F, col.names=F, sep='\t', quote=F
+)
+
+peak_ranges <- Signac::StringToGRanges(subset(proj@peakSet, peakType == 'Distal') %>% .$site_name, sep = c(":", "-")) %>% sort
+write.table(
+  as.data.frame(peak_ranges)[,1:3],
+  file='data/DARs/distalPeaks.bed',
+  row.names=F, col.names=F, sep='\t', quote=F
+)
+
+peak_ranges <- Signac::StringToGRanges(subset(proj@peakSet, peakType != 'Distal') %>% .$site_name, sep = c(":", "-")) %>% sort
+write.table(
+  as.data.frame(peak_ranges)[,1:3],
+  file='data/DARs/proximalPeaks.bed',
+  row.names=F, col.names=F, sep='\t', quote=F
+)
+
+
+# some settings
+min_peaks <- 25             # min number of up-regulated peaks per cluster. skips if thresh is not met.
+upreg <- TRUE             # up-regulated or down-regulated peaks?
+peak_outdir <- 'data/DARs/' # directory to dump output files
+
+# loop through DAR list:
+for(DARs in names(DAR_list)){
+  print(DARs)
+
+  # crete output directory if it hasn't been made already
+  dir.create(paste0(peak_outdir,DARs))
+
+  # get current set of DARs
+  cur_DARs <- DAR_list[[DARs]]
+
+  # add a column for peak type
+  cur_DARs$peakType <- as.character(proj@peakSet$peakType)[match(cur_DARs$gene, proj@peakSet$site_name)]
+
+  # loop over clusters:
+  for(clust in unique(cur_DARs$cluster)){
+    print(clust)
+
+    # get peaks for this celltype
+    cur_peaks <- subset(cur_DARs, cluster == clust)
+
+    # get up-regulated peaks
+    if(upreg){
+      cur_peaks <- subset(cur_peaks, avg_logFC >= 0)
+      file_suffix = 'upregulated'
+    } else{
+      cur_peaks <- subset(cur_peaks, avg_logFC < 0)
+      file_suffix = 'downregulated'
+    }
+
+    if(dim(cur_peaks) < min_peaks){
+      print(paste('too few peaks, skipping', clust))
+      next
+    }
+
+    # split by distal and gene-proximal peaks and write:
+    distal_peaks <- subset(cur_peaks, peakType == 'Distal')
+    proximal_peaks <- subset(cur_peaks, peakType != 'Distal')
+
+    # convert to GRanges objects and sort:
+    distal_ranges <- Signac::StringToGRanges(distal_peaks$gene, sep = c(":", "-")) %>% sort
+    proximal_ranges <- Signac::StringToGRanges(proximal_peaks$gene, sep = c(":", "-")) %>% sort
+    cur_peak_ranges <- Signac::StringToGRanges(cur_peaks$gene, sep = c(":", "-")) %>% sort
+
+    # write to bed files
+    write.table(
+      as.data.frame(distal_ranges)[,1:3],
+      file=paste0(peak_outdir, DARs, '/', clust, '_',file_suffix, '_distal.bed'),
+      row.names=F, col.names=F, sep='\t', quote=F
+    )
+    write.table(
+      as.data.frame(proximal_ranges)[,1:3],
+      file=paste0(peak_outdir, DARs, '/', clust, '_', file_suffix, '_proximal.bed'),
+      row.names=F, col.names=F, sep='\t', quote=F
+    )
+    write.table(
+      as.data.frame(cur_peak_ranges)[,1:3],
+      file=paste0(peak_outdir, DARs, '/', clust, '_', file_suffix, '.bed'),
+      row.names=F, col.names=F, sep='\t', quote=F
+    )
+  }
+}
+
+
+```
+
+
+
+Plot output from rGREAT (which was run using the above .bed files)
+
+```{r eval=FALSE}
+
+library(tidyverse)
+library(cowplot)
+theme_set(theme_cowplot())
+
+
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+great_parent_dir <- 'data/OUTPUTs/'
+great_output_dirs <- paste0(great_parent_dir, dir(great_parent_dir), '/All_GOAnnotations/')
+output_groups <- c('celltype', 'cluster', 'diagnosis_celltype', 'diagnosis_cluster')
+
+# settings:
+n_terms <- 20
+n_terms_barplot <- 20
+
+
+# heatmap of just up-regulated proximal peaks
+upregulated <- TRUE
+
+
+# loop through each output dir
+for(i in 1:length(great_output_dirs)){
+  cur_output_dir <- great_output_dirs[i]
+  great_group <- output_groups[i]
+
+  # split files by proximal, distal, all peaks:
+  cur_files <- dir(cur_output_dir)
+
+  cur_files_list <- list(
+    'proximal' = cur_files[grepl('proximal', cur_files)],
+    'distal' = cur_files[grepl('distal', cur_files)]
+  )
+  cur_files_list$allPeaks <- cur_files[!(cur_files %in% c(cur_files_list$proximal, cur_files_list$distal))]
+
+  # loop through files list:
+  for(peakType in names(cur_files_list)){
+
+    cur_files <- cur_files_list[[peakType]]
+    fig_name <- paste0(great_group, '_', peakType, '_')
+
+    if(upregulated){
+      cur_files <- cur_files[grepl('upregulated', cur_files)]
+      fig_name <- paste0(fig_name, 'upregulated')
+    } else{
+      cur_files <- cur_files[grepl('downregulated', cur_files)]
+      fig_name <- paste0(fig_name, 'downregulated')
+    }
+
+    # combine files into one table:
+    dir.create(paste0('figures/barplots/', great_group))
+
+    great_df <- data.frame()
+    for(file in cur_files){
+      cur_df <- readRDS(paste0(cur_output_dir, file))[[2]]
+
+      # add column for cluster or celltype:
+      group <- unlist(str_split(file, '_'))[1]
+      cur_df$group <- group
+
+      # add significance levels:
+      measure <- "Hyper_Adjp_BH"
+      cur_df$Significance <- ifelse(cur_df[[measure]] > 0.05, '', ifelse(cur_df[[measure]] > 0.005, '*', ifelse(cur_df[[measure]] > 0.0005, '**', '***')))
+
+      # add text wrapping:
+      cur_df$wrap <- wrapText(cur_df$name, 45)
+
+      # plot barplot
+      plot_df <- head(cur_df, n_terms_barplot)
+      p <- ggplot(plot_df, aes(y=log(Hyper_Fold_Enrichment), x=reorder(wrap, log(Hyper_Fold_Enrichment)))) +
+        geom_bar(stat='identity', color='black', fill='black') +
+        xlab('') +
+        coord_flip() +
+        ggtitle(paste(unique(plot_df$group), fig_name))
+
+      plot_name <- paste0(unique(plot_df$group), '_', fig_name)
+      pdf(paste0('figures/barplots/', great_group, '/', plot_name, '.pdf'), width=8, height=10)
+      print(p)
+      dev.off()
+
+      # get top entries by p-value (default sorting of these files):
+      cur_df <- head(cur_df, n_terms)
+
+      great_df <- rbind(great_df, cur_df)
+    }
+
+    # force levels for GO terms:
+    great_df$name <- factor(great_df$name, levels=rev(unique(great_df$name)))
+    great_df$wrap <- factor(great_df$wrap, levels=rev(unique(great_df$wrap)))
+
+    # plot heatmap
+    p <- ggplot(great_df, aes(group, wrap, fill=log(Hyper_Fold_Enrichment))) +
+      geom_tile() +
+      geom_text(aes(label=Significance)) +
+      scale_fill_gradient(low = "white", high = "red", space = "Lab",
+        guide = guide_colorbar(barwidth=.5, barheight=7.5, ticks=FALSE)) +
+      xlab('') + ylab('') + labs(fill = "log(fold enrichment)") +
+      theme(
+        axis.text.x=element_text(angle=90, vjust=0.5),
+        panel.background=element_blank(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        plot.background=element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.5)
+      )
+
+
+    pdf(paste0('figures/heatmaps/', fig_name,'.pdf'), width=10, height=16)
+    print(p)
+    dev.off()
+
+    great_df %>% dplyr::select(-c(Significance, wrap)) %>%
+    write.table(paste0('data/', fig_name, '.tsv'), quote=FALSE, row.names=FALSE, sep='\t')
+
+  }
+}
+
+
+```
