@@ -1,0 +1,646 @@
+```{r eval-FALSE}
+
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(ArchR)
+library(future.apply)
+library(ggpubr)
+library(reshape2)
+library(patchwork)
+library(ggridges)
+library(RColorBrewer)
+library(Gviz)
+
+
+# load ArchR project
+proj <- loadArchRProject(path = "ArchR/all_samples/")
+proj@peakSet$site_name <- paste0(as.character(seqnames(proj@peakSet)), '-', start(proj@peakSet), '-', end(proj@peakSet))
+
+
+fig_dir <- "/dfs7/dfs3/swaruplab/smorabit/analysis/AD_NucSeq_2019/atac_analysis/all_data/cluster_characterization/figures/"
+
+library(EnsDb.Hsapiens.v86)
+gene.coords <- genes(EnsDb.Hsapiens.v86, filter = ~ gene_biotype == "protein_coding")
+genebody.coords <- keepStandardChromosomes(gene.coords, pruning.mode = 'coarse')
+genebodyandpromoter.coords <- Extend(x = gene.coords, upstream = 2000, downstream = 0)
+genebodyandpromoter.coords <- genebodyandpromoter.coords %>% subset(seqnames %in% c(1:22,'Y','X'))
+
+linc_genes <- genes(EnsDb.Hsapiens.v86, filter = ~ gene_biotype == 'lincRNA')
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+```
+
+
+MBP coveragePlot
+
+```{r eval=FALSE}
+
+NucSeq.atac <- readRDS(file='data/NucSeq_macs2Peaks_signac.rds')
+fig_dir <- "figures/"
+
+cur_gene <- 'MBP'
+cur_celltype <- 'ODC'
+pdf(paste0(fig_dir, 'CoveragePlot_',  cur_gene, '.pdf'), width=4, height=5)
+Signac::CoveragePlot(
+  NucSeq.atac,
+  region=cur_gene,
+  group.by='monocle_clusters_umap_Cell.Type',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+
+cur_pos <- subset(genebodyandpromoter.coords, symbol==cur_gene)
+cur_position <- paste0('chr', as.character(seqnames(cur_pos)), ':',start(cur_pos)-2000,'-',start(cur_pos)) # promoter only
+chr <- as.character(seqnames(cur_pos))
+gen <- 'hg38'
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+print(paste(cur_gene, 'chr:', as.character(seqnames(cur_pos)), ',', abs(start(cur_pos) - end(cur_pos)) + 2000))
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/ideogram_', cur_gene, '.pdf'), width=8, height=2)
+plotTracks(list(itrack), from=start(cur_pos), to=end(cur_pos), showId=FALSE)
+dev.off()
+
+
+```
+
+cell type proportions:
+```{r eval=FALSE}
+
+cur_celltypes <- c('INH', 'EX')
+name = 'neuronal'
+w=4; h=6;
+
+cur_celltypes <- c('ASC', 'MG')
+name = 'glia'
+w=4; h=6;
+
+cur_celltypes <- c('ODC', 'OPC')
+name = 'oligo'
+w=4; h=7;
+
+seurat_obj <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% cur_celltypes)
+meta_list <- seurat_obj@meta.data %>%
+  dplyr::group_split(Sample.ID)
+
+temp <- lapply(meta_list, function(meta){
+  print(table(meta$Diagnosis))
+  df <- as.data.frame(meta$monocle_clusters_umap_ID %>% table / nrow(meta))
+  colnames(df) <- c('cluster', 'proportion')
+  df$SampleID <- paste0(unique(meta$Dataset), '_', unique(meta$Sample.ID))
+  df$Diagnosis <- unique(meta$Diagnosis)
+  df
+})
+proportion_df <- Reduce(rbind, temp)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+# relevel for ODCs;
+proportion_df$cluster <- factor(
+  as.character(proportion_df$cluster),
+  levels=c('OPC.a', 'ODC.a', 'ODC.b', 'ODC.l', 'ODC.g', 'ODC.i', 'ODC.m', 'ODC.j', 'ODC.f', 'ODC.h', 'ODC.c', 'ODC.e', 'ODC.k', 'ODC.d')
+)
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+
+# box plot
+p <- ggplot(proportion_df, aes(y=proportion, x=reorder(cluster, -cluster_num), fill=Diagnosis)) +
+  geom_boxplot(outlier.shape=NA, color='black') +
+  coord_flip() +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position="bottom",
+  ) + xlab('') + ylim(c(0, 0.4))
+
+pdf(paste0(fig_dir, name, '_composition_boxplot.pdf'), width=w, height=h)
+p
+dev.off()
+
+```
+
+
+Bootstapped sampling of each cluster a bunch of times to compute significance levels
+
+```{r eval=FALSE}
+library(gtools)
+NucSeq.atac.cortex$monocle_clusters_umap_ID <- as.character(NucSeq.atac.cortex$monocle_clusters_umap_ID)
+
+
+cur_celltypes <- c('INH', 'EX')
+name = 'neuronal'
+w=4; h=6;
+
+cur_celltypes <- c('ASC', 'MG')
+name = 'glia'
+w=4; h=6;
+
+cur_celltypes <- c('ODC', 'OPC')
+name = 'oligo'
+w=4; h=7;
+
+seurat_obj <- subset(NucSeq.atac.cortex, monocle_clusters_umap_Cell.Type %in% cur_celltypes)
+
+sample_percent=0.20
+n_iterations = 25
+
+proportion_df <- data.frame()
+for(i in 1:n_iterations){
+  cur_sample <- seurat_obj@meta.data[sample(rownames(seurat_obj@meta.data), round(sample_percent*ncol(seurat_obj))),]
+
+  meta_list <- cur_sample %>%
+    dplyr::group_split(Sample.ID)
+
+  temp <- lapply(meta_list, function(meta){
+    df <- as.data.frame(meta$monocle_clusters_umap_ID %>% table / nrow(meta))
+    colnames(df) <- c('cluster', 'proportion')
+    df$SampleID <- paste0(unique(meta$Dataset), '_', unique(meta$Sample.ID))
+    df$Diagnosis <- unique(meta$Diagnosis)
+    df
+  })
+
+  cur_df <- Reduce(rbind, temp)
+  cur_df$iteration <- i
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+clusters <- unique(seurat_obj@meta.data$monocle_clusters_umap_ID)
+clusters <- clusters[order(clusters)]
+
+pvals <- sapply(clusters, function(cur_cluster){
+  result <- wilcox.test(
+    proportion_df %>% subset(Diagnosis=='AD' & cluster==cur_cluster) %>% .$proportion,
+    proportion_df %>% subset(Diagnosis=='Control' & cluster==cur_cluster) %>% .$proportion
+  )
+  result$p.value
+})
+
+result_table <- data.frame(
+  pval = as.numeric(pvals),
+  cluster = names(pvals),
+  signif = as.character(stars.pval(pvals))
+)
+
+neuronal_result_table <- result_table
+glia_result_table <- result_table
+oligo_result_table <- result_table
+
+result_table <- Reduce(rbind, list(
+  glia_result_table, neuronal_result_table, oligo_result_table
+))
+result_table$FDR <- p.adjust(result_table$pval, method='fdr')
+result_table$FDR_signif <- as.character(stars.pval(result_table$FDR))
+
+write.csv(result_table, file='data/snATAC_bootstrapped_cluster_proportion_results.csv', quote=FALSE)
+
+```
+
+Astrocyte regions:
+
+```{r eval=FALSE}
+
+cur_celltype <- 'ASC'
+cur_seurat <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+cur_seurat_cortex <- subset(NucSeq.atac.cortex, monocle_clusters_umap_Cell.Type == cur_celltype)
+DefaultAssay(cur_seurat_cortex) <- 'RNA'
+Idents(cur_seurat_cortex) <- cur_seurat_cortex$monocle_clusters_umap_ID
+
+cur_gene <- 'GFAP'
+cur_gene <- 'CD44'
+cur_gene <- 'VCAN'
+cur_gene <- 'WIF1'
+cur_gene <- 'NEAT1'
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0(fig_dir, '/', cur_celltype, '/coverage_', cur_celltype, '_', cur_gene, '.pdf'), width=10, height=10)
+Signac::CoveragePlot(
+  cur_seurat,
+  region=cur_gene,
+  group.by='monocle_clusters_umap_ID',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/vlnplot_', cur_celltype, '_', cur_gene, '.pdf'), width=10, height=4)
+VlnPlot(
+  cur_seurat_cortex,
+  features=cur_gene,
+  pt.size=0, split.by='Diagnosis', split.plot=TRUE, ncol=1
+) + stat_compare_means(method='wilcox.test', label='p.signif') +
+theme(legend.position = 'bottom') + xlab('')
+dev.off()
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/vlnplot_', cur_celltype, '_peaks.pdf'), width=10, height=4)
+VlnPlot(
+  cur_seurat_cortex,
+  features="nCount_peaks",
+  pt.size=0, split.by='Diagnosis', split.plot=TRUE, ncol=1
+) + stat_compare_means(method='wilcox.test', label='p.signif') +
+theme(legend.position = 'bottom') + xlab('')
+dev.off()
+
+```
+
+Microglia regions:
+
+```{r eval=FALSE}
+
+cur_celltype <- 'MG'
+cur_seurat <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type == cur_celltype)
+cur_seurat_cortex <- subset(NucSeq.atac.cortex, monocle_clusters_umap_Cell.Type == cur_celltype)
+DefaultAssay(cur_seurat_cortex) <- 'RNA'
+Idents(cur_seurat_cortex) <- cur_seurat_cortex$monocle_clusters_umap_ID
+
+cur_gene <- 'CD163'
+cur_gene <- 'TMEM163'
+cur_gene <- 'SPP1'
+cur_gene <- 'CX3CR1'
+cur_gene <- 'APOE'
+
+
+# MG.d
+cur_gene <- 'ETS1'
+cur_gene <- 'CD247'
+cur_gene <- 'CAMK4'
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0(fig_dir, '/', cur_celltype, '/coverage_', cur_celltype, '_', cur_gene, '.pdf'), width=10, height=10)
+Signac::CoveragePlot(
+  cur_seurat,
+  region=cur_gene,
+  group.by='monocle_clusters_umap_ID',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/vlnplot_', cur_celltype, '_', cur_gene, '.pdf'), width=10, height=4)
+VlnPlot(
+  cur_seurat_cortex,
+  features=cur_gene,
+  pt.size=0, split.by='Diagnosis', split.plot=TRUE, ncol=1
+) + stat_compare_means(method='wilcox.test', label='p.signif') +
+theme(legend.position = 'bottom') + xlab('')
+dev.off()
+
+```
+
+ASC + MG regions:
+
+```{r eval=FALSE}
+
+gene_list <- c('GFAP', 'WIF1', 'TNC', 'CHI3L1', 'ADAMTS17', 'CSF1R', 'CD163', 'SPP1', 'CX3CR1', 'ETS1')
+
+cur_celltype <- 'ASC_MG'
+cur_seurat <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% c('ASC', 'MG'))
+cur_seurat_cortex <- subset(NucSeq.atac.cortex, monocle_clusters_umap_Cell.Type  %in% c('ASC', 'MG'))
+DefaultAssay(cur_seurat_cortex) <- 'RNA'
+Idents(cur_seurat_cortex) <- cur_seurat_cortex$monocle_clusters_umap_ID
+
+# ASC
+cur_gene <- 'GFAP'
+cur_gene <- 'WIF1'
+cur_gene <- 'TNC'
+cur_gene <- 'CHI3L1'
+cur_gene <- 'ADAMTS17'
+
+# MG
+cur_gene <- 'CSF1R'
+cur_gene <- 'CD163'
+cur_gene <- 'SPP1'
+cur_gene <- 'CX3CR1'
+cur_gene <- 'ETS1'
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0(fig_dir, '/', cur_celltype, '/coverage_', cur_gene, '.pdf'), width=5, height=10)
+Signac::CoveragePlot(
+  cur_seurat,
+  region=cur_gene,
+  group.by='monocle_clusters_umap_ID',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+cur_pos <- subset(genebodyandpromoter.coords, symbol==cur_gene)
+cur_position <- paste0('chr', as.character(seqnames(cur_pos)), ':',start(cur_pos)-2000,'-',start(cur_pos)) # promoter only
+chr <- as.character(seqnames(cur_pos))
+gen <- 'hg38'
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+print(paste(cur_gene, 'chr:', as.character(seqnames(cur_pos)), ',', abs(start(cur_pos) - end(cur_pos)) + 2000))
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/ideogram_', cur_gene, '.pdf'), width=8, height=2)
+plotTracks(list(itrack), from=start(cur_pos), to=end(cur_pos), showId=FALSE)
+dev.off()
+
+
+```
+
+
+OPC + ODC regions:
+
+```{r eval=FALSE}
+
+
+cur_celltype <- 'ODC'
+cur_seurat <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% c('ODC', 'OPC'))
+
+# re-level based on hierarchy:
+Idents(cur_seurat) <- factor(
+  as.character(cur_seurat$monocle_clusters_umap_ID),
+  levels=c('OPC.a', 'ODC.a', 'ODC.b', 'ODC.l', 'ODC.g', 'ODC.i', 'ODC.m', 'ODC.j', 'ODC.f', 'ODC.h', 'ODC.c', 'ODC.e', 'ODC.k', 'ODC.d')
+)
+cur_seurat$ODC_lineage <- ifelse(cur_seurat$monocle_clusters_umap_ID == 'OPC.a', 'pro', ifelse(cur_seurat$monocle_clusters_umap_ID  %in% c('ODC.a', 'ODC.b', 'ODC.l', 'ODC.g'), 'mf', 'mat'))
+cur_seurat$lineage_diagnosis <- paste0(cur_seurat$ODC_lineage, '_', cur_seurat$Diagnosis)
+cur_seurat$lineage_diagnosis <- factor(as.character(cur_seurat$lineage_diagnosis), levels=c('pro_AD', 'pro_Control', 'mf_AD', 'mf_Control',  'mat_AD', 'mat_Control'))
+
+
+cur_gene <- 'ITPR2' # "ITPR2 chr: 12 , 500683"
+cur_gene <- 'APOLD1' # "APOLD1 chr: 12 , 108058"
+cur_gene <- 'VCAN' #  "VCAN chr: 5 , 114838"
+cur_gene <- 'OPALIN' #" OPALIN chr: 10 , 20149"
+cur_gene <- 'CD74' # "CD74 chr: 5 , 15292"
+cur_gene <- 'MOG' # "MOG chr: 6 , 19391"
+cur_gene <- 'CNP' # "CNP chr: 17 , 14990"
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0(fig_dir, '/', cur_celltype, '/coverage_', cur_gene, '.pdf'), width=5, height=10)
+Signac::CoveragePlot(
+  cur_seurat,
+  region=cur_gene,
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0(fig_dir, '/', cur_celltype, '/coverage_', cur_gene, '_lineage.pdf'), width=5, height=5)
+Signac::CoveragePlot(
+  cur_seurat,
+  group.by='lineage_diagnosis',
+  region=cur_gene,
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+cur_pos <- subset(genebodyandpromoter.coords, symbol==cur_gene)
+cur_position <- paste0('chr', as.character(seqnames(cur_pos)), ':',start(cur_pos)-2000,'-',start(cur_pos)) # promoter only
+chr <- as.character(seqnames(cur_pos))
+gen <- 'hg38'
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+print(paste(cur_gene, 'chr:', as.character(seqnames(cur_pos)), ',', abs(start(cur_pos) - end(cur_pos)) + 2000))
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/ideogram_', cur_gene, '.pdf'), width=8, height=2)
+plotTracks(list(itrack), from=start(cur_pos), to=end(cur_pos), showId=FALSE)
+dev.off()
+
+
+
+```
+
+## Neurons regions:
+
+```{r eval=FALSE}
+
+cur_celltype <- 'Neuron'
+cur_seurat <- subset(NucSeq.atac, monocle_clusters_umap_Cell.Type %in% c('EX', 'INH'))
+cur_seurat_cortex <- subset(NucSeq.atac.cortex, monocle_clusters_umap_Cell.Type  %in% c('EX', 'INH'))
+DefaultAssay(cur_seurat_cortex) <- 'RNA'
+Idents(cur_seurat_cortex) <- cur_seurat_cortex$monocle_clusters_umap_ID
+
+# INH
+cur_gene <- 'GAD2'
+cur_gene <- 'VIP'
+cur_gene <- 'PVALB'
+cur_gene <- 'SST'
+cur_gene <- 'LAMP5'
+
+# EX:
+cur_gene <- 'RORB'
+cur_gene <- 'CBLN2'
+cur_gene <- 'THEMIS'
+cur_gene <- 'FEZF2'
+cur_gene <- 'SLC17A7'
+cur_gene <- 'LINC02306'
+
+DefaultAssay(cur_seurat) <- 'peaks'
+pdf(paste0(fig_dir, '/', cur_celltype, '/coverage_', cur_gene, '.pdf'), width=5, height=10)
+Signac::CoveragePlot(
+  cur_seurat,
+  region=cur_gene,
+  group.by='monocle_clusters_umap_ID',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/vlnplot_', cur_gene, '.pdf'), width=10, height=4)
+VlnPlot(
+  cur_seurat_cortex,
+  features=cur_gene,
+  pt.size=0, split.by='Diagnosis', split.plot=TRUE, ncol=1
+) + stat_compare_means(method='wilcox.test', label='p.signif') +
+theme(legend.position = 'bottom') + xlab('')
+dev.off()
+
+
+cur_pos <- subset(genebodyandpromoter.coords, symbol==cur_gene)
+cur_position <- paste0('chr', as.character(seqnames(cur_pos)), ':',start(cur_pos)-2000,'-',start(cur_pos)) # promoter only
+chr <- as.character(seqnames(cur_pos))
+gen <- 'hg38'
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+print(paste(cur_gene, 'chr:', as.character(seqnames(cur_pos)), ',', abs(start(cur_pos) - end(cur_pos)) + 2000))
+
+pdf(paste0(fig_dir, '/', cur_celltype, '/ideogram_', cur_gene, '.pdf'), width=8, height=2)
+plotTracks(list(itrack), from=start(cur_pos), to=end(cur_pos), showId=FALSE)
+dev.off()
+
+```
+
+
+## Regions for Figure 1:
+
+```{r eval=FALSE}
+
+Idents(NucSeq.atac) <- NucSeq.atac$monocle_clusters_umap_Cell.Type
+
+cur_gene <- 'GFAP' # "GFAP chr: 17 , 15929"
+cur_gene <- 'GAD2' # "GAD2 chr: 10 , 92251"
+cur_gene <- 'SLC17A7' # "SLC17A7 chr: 19 , 16959"
+cur_gene <- 'CSF1R' # "CSF1R chr: 5 , 64081"
+cur_gene <- 'MOBP' # "MOBP chr: 3 , 66281"
+cur_gene <- 'PDGFRA' # "PDGFRA chr: 4 , 73150"
+
+DefaultAssay(NucSeq.atac) <- 'peaks'
+pdf(paste0(fig_dir, '/celltype/coverage_', cur_gene, '.pdf'), width=4, height=5)
+Signac::CoveragePlot(
+  NucSeq.atac,
+  region=cur_gene,
+  group.by='monocle_clusters_umap_Cell.Type',
+  extend.upstream=1000,
+  extend.downstream=1000,
+  peaks=FALSE
+)
+dev.off()
+
+cur_pos <- subset(genebodyandpromoter.coords, symbol==cur_gene)
+chr <- as.character(seqnames(cur_pos))
+gen <- 'hg38'
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+print(paste(cur_gene, 'chr:', as.character(seqnames(cur_pos)), ',', abs(start(cur_pos) - end(cur_pos)) + 2000))
+
+pdf(paste0(fig_dir, '/celltype/ideogram_', cur_gene, '.pdf'), width=8, height=2)
+plotTracks(list(itrack), from=start(cur_pos), to=end(cur_pos), showId=FALSE)
+dev.off()
+
+
+```
+
+
+### Plot chromVAR motif heatmap
+
+Plot top chromVAR TFs in all groups:
+
+```{r eval=FALSE}
+
+library(dendsort)
+library(ComplexHeatmap)
+
+# get motif names:
+DefaultAssay(NucSeq.atac.cortex) <- 'peaks'
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+
+# subset seurat obj
+Idents(NucSeq.atac.cortex) <- factor(as.character(NucSeq.atac.cortex$monocle_clusters_umap_Cell.Type), levels=unique(as.character(NucSeq.atac.cortex$monocle_clusters_umap_Cell.Type))[order(unique(as.character(NucSeq.atac.cortex$monocle_clusters_umap_Cell.Type)))])
+
+# load DA motifs
+load('../chromVar/data/diagnosis_da_motifs.rda')
+load('../chromVar/data/da_motifs.rda')
+da_motifs_celltypes$motif_name <- motif_names[da_motifs_celltypes$gene]
+diagnosis_da_motifs$motif_name <- motif_names[diagnosis_da_motifs$gene]
+
+
+cur_motifs <- da_motifs_celltypes %>%
+  subset(avg_logFC >= 0) %>%
+  group_by(cluster) %>%
+  top_n(3, wt=avg_logFC) %>%
+  .$gene
+
+cur_motifs <- c(cur_motifs, names(motif_names)[motif_names %in% c('TFDP1', 'GMEB2')])
+
+# average expression of cur motifs
+deviation_matrix <- AverageExpression(NucSeq.atac.cortex, assay='chromvar', add.ident='Diagnosis', features=unique(cur_motifs))
+deviation_matrix <- deviation_matrix$chromvar
+
+# convert to Z score
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(deviation_matrix, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# set row annotation:
+rownames(matrix_z) <- unlist(motif_names[rownames(matrix_z)])
+
+# re-order rows:
+row_order <- c(
+  'ISX', 'SHOX', 'LHX9', 'PRRX1', 'RAX2',
+  'JUN(var.2)', "NEUROD1", "FOS",
+  'NRF1', 'ASCL1', 'ZBTB33',
+  'SPI1', 'ETV6', 'ELF5',
+  'SOX13', 'SOX9',
+  'HINFP',
+  'TFDP1', 'GMEB2'
+)
+matrix_z <- matrix_z[row_order,]
+
+# set col annotation
+celltype_colors <- unlist(color_scheme_snATAC_celltype[1:7])
+column_ha <- HeatmapAnnotation(
+  CellType = do.call(rbind, str_split(colnames(matrix_z), '[_]'))[,1],
+  Diagnosis = do.call(rbind, str_split(colnames(matrix_z), '_'))[,2],
+  col = list(
+    CellType = celltype_colors,
+    Diagnosis = c("AD" = "#E87D72", "Control" = "#55BCC2")
+  )
+)
+
+col_fun = colorRamp2(c(0, 3), c("white", "red"))
+col_fun = colorRamp2(seq(-2, 3, length = 11),rev(brewer.pal(11, "Spectral")))
+
+# plot heatmap
+pdf('figures/chromvar_heatmap.pdf', width=5, height=4)
+ComplexHeatmap::Heatmap(
+  matrix_z, show_column_names = FALSE, show_row_names=TRUE,
+  col = col_fun,
+  cluster_rows = FALSE , cluster_columns = FALSE,
+  top_annotation = column_ha
+)
+dev.off()
+
+
+```
+
+### Plot motif logos:
+
+```{r eval=FALSE}
+
+# all motif names:
+motif_names <- GetMotifData(NucSeq.atac, slot='motif.names')
+
+load('../chromVar/data/diagnosis_da_motifs.rda')
+load('../chromVar/data/da_motifs.rda')
+da_motifs_celltypes$motif_name <- motif_names[da_motifs_celltypes$gene]
+diagnosis_da_motifs$motif_name <- motif_names[diagnosis_da_motifs$gene]
+
+
+# MG
+names(motif_names[grepl('SPI1', motif_names)])
+cur_motif <- 'SPI1'
+cur_motif <- 'ETS1'
+
+# ODC
+cur_motif <- 'SOX9'
+cur_motif <- 'SREBF1'
+cur_motif <- 'NRF1'
+
+# ASC:
+cur_motif <- 'FOSL2'; cur_motif_ID <- 'MA0478.1'
+cur_motif <- 'SHOX'
+
+cur_motif <- 'JUN'; cur_motif_ID <- 'MA0489.1'
+cur_motif <- 'EGR1'
+
+cur_motif_ID <- names(motif_names[grepl(cur_motif, motif_names)])
+
+
+pdf(paste0('figures/motif_logos/', cur_motif,'_motif.pdf'), width=4, height=2)
+MotifPlot(
+  object = NucSeq.atac,
+  motifs = cur_motif_ID
+)
+dev.off()
+
+
+```
